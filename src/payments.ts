@@ -18,6 +18,7 @@ import { type Installation, type Installations, NotConfiguredError } from "./ins
 import { ELEMENT_TAG } from "./manifest.ts";
 import { AmountError, toStripeAmount } from "./stripe/amounts.ts";
 import { type PaymentIntent, StripeError } from "./stripe/api.ts";
+import { reportToHypha } from "./stripe-webhooks.ts";
 
 /** Which installation each call is for: set when its secret is looked up by `Hypha-Store`. */
 const callers = new WeakMap<Request, Installation>();
@@ -60,16 +61,42 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
     } satisfies PaymentsStartResponse;
   });
 
-  const capture = defineExtensionHandler("payments.capture", async (body, context) =>
-    act(context, body, async (stripe, reference, key) => {
+  const capture = defineExtensionHandler("payments.capture", async (body, context) => {
+    let captured: PaymentIntent | undefined;
+    const answer = await act(context, body, async (stripe, reference, key) => {
       const params =
         body.amount == null
           ? {}
           : { amount_to_capture: toStripeAmount(body.amount.amount, body.amount.currency) };
-      const intent = await stripe.capturePaymentIntent(reference, params, key);
-      return intent.id;
-    }),
-  );
+      captured = await stripe.capturePaymentIntent(reference, params, key);
+      return captured.id;
+    });
+    // Stripe's answer already says the money is taken: report it now rather than wait
+    // for `payment_intent.succeeded`, which can be late or lost (an endpoint set up after
+    // the payment). The webhook's report later changes nothing: a paid payment stays
+    // paid. A failed report is logged; the webhook is still the backstop.
+    if (answer.status === "accepted" && captured?.status === "succeeded") {
+      const installation = installationOf(context);
+      await reportToHypha(
+        installations,
+        installation,
+        {
+          payment: body.payment,
+          type: "paid",
+          reference: captured.id,
+          occurred_at: new Date().toISOString(),
+          key: `${captured.id}:captured`,
+        },
+        `${captured.id}:captured`,
+      ).catch((error: unknown) =>
+        deps.log("warn", "reporting a capture failed; waiting for Stripe's webhook", {
+          payment: body.payment,
+          error: String(error),
+        }),
+      );
+    }
+    return answer;
+  });
 
   const voidPayment = defineExtensionHandler("payments.void", async (body, context) =>
     act(context, body, async (stripe, reference, key) => {

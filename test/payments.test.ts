@@ -211,3 +211,23 @@ test("an action on a payment without an intent is refused", async () => {
   ).json()) as { status: string };
   assert.equal(answer.status, "refused");
 });
+
+test("a capture Stripe completes is reported paid at once, without waiting for the webhook", async () => {
+  const h = await harness();
+  await h.install();
+  await configure(h, { captureMode: "manual" });
+  const { reference } = (await (await h.extension("payments.start", START)).json()) as {
+    reference: string;
+  };
+  const intent = h.stripe.intents.get(reference);
+  if (intent) intent.status = "requires_capture";
+
+  const answer = await (
+    await h.extension("payments.capture", { payment: "pay_0001", order: "ord_0001", reference })
+  ).json();
+  assert.deepEqual(answer, { status: "accepted", reference });
+  const paid = h.hypha.events.filter((e) => e.payment === "pay_0001" && e.body.type === "paid");
+  assert.equal(paid.length, 1);
+  assert.equal(paid[0]?.idempotencyKey, `${reference}:captured`);
+  assert.equal(paid[0]?.body.reference, reference);
+});
