@@ -1,0 +1,9 @@
+# Not a workspace of several packages: this file holds pnpm's settings for the app.
+packages: []
+# Dependency install scripts run only when listed here (pnpm blocks them by default).
+# workerd fetches the Workers runtime binary `wrangler dev` runs in; esbuild finds its
+# binary in its platform package without its script.
+allowBuilds:
+  workerd: true
+  esbuild: false
+  sharp: false

@@ -1,0 +1,42 @@
+{
+  "name": "hypha-app-stripe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hypha's first-party Stripe app (design note 0029): card payments through Stripe's Payment Element, installed over OAuth, on Cloudflare Workers or Node.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-assets.ts",
+    "build:check": "node scripts/build-assets.ts --check",
+    "start": "node src/entry/node.ts",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "wrangler deploy",
+    "test": "node --test test/*.test.ts",
+    "e2e": "node scripts/e2e.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "vp lint --deny-warnings",
+    "lint:fix": "vp lint --fix",
+    "fmt": "vp fmt",
+    "fmt:check": "vp fmt --check",
+    "build:node": "node scripts/build-node.ts"
+  },
+  "dependencies": {
+    "@hypha/app": "link:../hypha/packages/app",
+    "@hypha/app-blocks": "link:../hypha/packages/app-blocks",
+    "@hypha/app-bridge": "link:../hypha/packages/app-bridge",
+    "hono": "4.13.12"
+  },
+  "devDependencies": {
+    "@hypha/storefront-elements": "link:../hypha/packages/storefront-elements",
+    "@types/node": "26.6.5",
+    "esbuild": "0.28.2",
+    "happy-dom": "20.14.6",
+    "typescript": "5.9.3",
+    "vite-plus": "1.3.0",
+    "wrangler": "4.147.0"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@12.6.0"
+}
