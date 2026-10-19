@@ -41,7 +41,9 @@ export function readConfig(env: Env): Config {
   } catch {
     throw new ConfigError(`APP_URL ${JSON.stringify(appUrl)} isn't a URL`);
   }
-  const local = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+  const local =
+    ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) ||
+    parsed.hostname.endsWith(".localhost");
   if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:"))
     throw new ConfigError("APP_URL must be https (http only for localhost)");
   const allowlist = (env.HYPHA_API_ALLOWLIST ?? "")

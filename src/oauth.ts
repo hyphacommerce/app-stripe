@@ -38,7 +38,9 @@ export function normalizeApiUrl(raw: string, allowlist: string[] | undefined): s
   } catch {
     throw new InstallError("That isn't a URL: give your Hypha API's address.");
   }
-  const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  const local =
+    ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) ||
+    url.hostname.endsWith(".localhost");
   if (url.protocol !== "https:" && !(local && url.protocol === "http:"))
     throw new InstallError("The Hypha API must be https (http only for localhost).");
   if (url.username || url.password) throw new InstallError("No credentials in the URL, please.");
