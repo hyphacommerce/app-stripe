@@ -608,7 +608,7 @@ try {
   );
   if (!REAL_STRIPE) {
     const refundKeys = fake.requests
-      .filter((r) => r.path === "/v1/refunds")
+      .filter((r) => r.method === "POST" && r.path === "/v1/refunds")
       .map((r) => r.idempotencyKey ?? "");
     check(
       "each refund reached Stripe under its own key, Hypha's per attempt",
@@ -620,12 +620,32 @@ try {
       refundKeys,
     );
   }
+  // Stripe's next charge.refunded lists both refunds: the first is counted once (Hypha
+  // dedupes by the refund's ID), the second adds its 1.00.
+  const charge = (amountRefunded: number) => ({
+    id: `evt_e2e_${randomBytes(6).toString("hex")}`,
+    object: "event",
+    type: "charge.refunded",
+    created: Math.floor(Date.now() / 1000),
+    data: { object: { ...refunded.data.object, amount_refunded: amountRefunded } },
+  });
+  const secondHook = await deliver(charge(600));
+  check(
+    "the second charge.refunded is reported",
+    secondHook.status === 200 && at(secondHook.body, "status") === "reported",
+    secondHook.body,
+  );
+  // The first event's charge again under a new event ID (as two raced events would be):
+  // nothing more is counted.
+  const againHook = await deliver(charge(500));
+  check("a refund reported again is accepted", againHook.status === 200, againHook.body);
   const fetched = await admin("GET", `/admin/payments/${paymentId}`);
   check(
-    "GET /admin/payments/{id} answers the payment with its order",
+    "GET /admin/payments/{id} answers the payment with its order, each refund counted once",
     fetched.status === 200 &&
       at(fetched.body, "order") === orderId &&
-      at(fetched.body, "refunded", "amount") === 500,
+      at(fetched.body, "refunded", "amount") === 600 &&
+      at(fetched.body, "reference") === intentId,
     fetched.body,
   );
 

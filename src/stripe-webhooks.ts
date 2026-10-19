@@ -1,16 +1,17 @@
 // Stripe's webhooks (`POST /stripe/webhook/:store`), verified with that store's signing
 // secret, handled once per event, and reported to Hypha as payment events
 // (`POST /admin/payments/{id}/events`, design note 0029, §3.1) with Stripe's event ID as
-// the `Idempotency-Key`, so a redelivery never counts twice.
+// the `Idempotency-Key`, so a redelivery never counts twice. Refunds are reported one per
+// Stripe refund, its `re_…` as the reference (Hypha counts each refund once by it) and as
+// the key, so two `charge.refunded` events, however they race, can't count one twice.
 
 import { NotInstalledError } from "@hypha/app";
 
 import type { Deps } from "./config.ts";
 import type { Installation, Installations } from "./installations.ts";
-import { fetchPayment } from "./hypha-api.ts";
 import { fromStripeAmount } from "./stripe/amounts.ts";
 import { bool, isRecord, num, parseJson, rec, str, strings } from "./json.ts";
-import type { StripeClient, StripeEvent } from "./stripe/api.ts";
+import type { Refund, StripeClient, StripeEvent } from "./stripe/api.ts";
 import { STRIPE_SIGNATURE_HEADER, verifyStripeSignature } from "./stripe/signature.ts";
 
 export type PaymentEventType =
@@ -25,13 +26,16 @@ export interface PaymentReport {
   payment: string;
   type: PaymentEventType;
   amount?: number;
+  /** The PaymentIntent's ID; for a refund, the refund's (`re_…`). */
   reference?: string;
   occurred_at?: string;
+  /** The `Idempotency-Key` it's sent with: the event's ID, or for a refund its own. */
+  key: string;
 }
 
 /** What happened to a webhook, for the answer and the tests. */
 export type WebhookOutcome =
-  | { status: "reported"; report: PaymentReport }
+  | { status: "reported"; reports: PaymentReport[] }
   | { status: "duplicate" }
   | { status: "ignored"; reason: string }
   | { status: "rejected"; reason: string };
@@ -58,7 +62,7 @@ export async function reportToHypha(
   report: PaymentReport,
   idempotencyKey: string,
 ): Promise<void> {
-  const { payment, ...body } = report;
+  const { payment, key: _key, ...body } = report;
   const response = await installations
     .client(installation)
     .fetch(`/admin/payments/${encodeURIComponent(payment)}/events`, {
@@ -77,36 +81,35 @@ export async function reportToHypha(
   );
 }
 
-/** The Hypha payment and what to report for a Stripe event; `undefined` to ignore it. */
+/** What to report to Hypha for a Stripe event, in order, or why it's ignored. */
 export async function mapStripeEvent(
   deps: Deps,
-  installations: Installations,
   installation: Installation,
   stripe: StripeClient,
   event: StripeEvent,
-): Promise<PaymentReport | { ignore: string }> {
+): Promise<PaymentReport[] | { ignore: string }> {
   const occurred_at = new Date(event.created * 1000).toISOString();
   const object = event.data.object;
   if (event.type.startsWith("payment_intent.")) {
     const payment = strings(object, "metadata").hypha_payment;
     const id = str(object, "id");
     if (!payment || !id) return { ignore: "not a Hypha payment" };
-    const base = { payment, reference: id, occurred_at };
+    const base = { payment, reference: id, occurred_at, key: event.id };
     switch (event.type) {
       case "payment_intent.succeeded":
-        return { ...base, type: "paid" };
+        return [{ ...base, type: "paid" }];
       case "payment_intent.amount_capturable_updated":
         if (!num(object, "amount_capturable")) return { ignore: "nothing capturable" };
-        return { ...base, type: "authorized" };
+        return [{ ...base, type: "authorized" }];
       case "payment_intent.payment_failed":
         // Hypha's `failed` is final; Stripe's attempt usually isn't: a declined intent
         // goes back to `requires_payment_method` and the shopper may try another card on
         // it. Only an intent that can't take money any more failed for Hypha.
         if (str(object, "status") !== "canceled")
           return { ignore: "the shopper may still pay this intent" };
-        return { ...base, type: "failed" };
+        return [{ ...base, type: "failed" }];
       case "payment_intent.canceled":
-        return { ...base, type: "voided" };
+        return [{ ...base, type: "voided" }];
       default:
         return { ignore: `${event.type} isn't reported` };
     }
@@ -117,30 +120,37 @@ export async function mapStripeEvent(
     let payment = (await deps.storage.paymentByIntent(installation.row.id, intentId))?.paymentId;
     payment ??= (await stripe.retrievePaymentIntent(intentId)).metadata?.hypha_payment;
     if (!payment) return { ignore: "not a Hypha payment" };
-    const base = { payment, reference: intentId, occurred_at };
-    if (bool(object, "refunded")) return { ...base, type: "refunded" };
-    // Hypha counts each refund's own amount; Stripe's charge says how much in all.
-    const total = fromStripeAmount(
-      num(object, "amount_refunded") ?? 0,
-      str(object, "currency") ?? "",
-    );
-    const already = await refundedInHypha(installations, installation, payment);
-    const amount = total - already;
-    if (amount <= 0) return { ignore: "Hypha has this refund already" };
-    return { ...base, type: "partially_refunded", amount };
+    return refundReports(payment, object, await stripe.listRefunds(intentId));
   }
   return { ignore: `${event.type} isn't handled` };
 }
 
-/** How much Hypha has counted as refunded on a payment. */
-async function refundedInHypha(
-  installations: Installations,
-  installation: Installation,
-  paymentId: string,
-): Promise<number> {
-  const payment = await fetchPayment(installations, installation, paymentId);
-  if (!payment) throw new Error(`Hypha has no payment ${paymentId}`);
-  return payment.refunded.amount;
+/** Every refund of the charge that gave money back (or will: `pending`), oldest first,
+ * each under its own ID. Hypha counts each once by that ID, so the ones it has already
+ * change nothing; the one that completes a fully refunded charge is `refunded`. */
+export function refundReports(
+  payment: string,
+  charge: Record<string, unknown>,
+  refunds: Refund[],
+): PaymentReport[] | { ignore: string } {
+  const currency = str(charge, "currency") ?? "";
+  const whole = num(charge, "amount") ?? 0;
+  const counted = refunds.filter((r) => r.status === "succeeded" || r.status === "pending");
+  if (counted.length === 0) return { ignore: "no refund gave money back" };
+  let running = 0;
+  return counted.map((refund, i) => {
+    running += refund.amount;
+    const last = i === counted.length - 1;
+    const completes = last && bool(charge, "refunded") === true && running >= whole;
+    return {
+      payment,
+      type: completes ? "refunded" : "partially_refunded",
+      amount: fromStripeAmount(refund.amount, currency),
+      reference: refund.id,
+      occurred_at: new Date(refund.created * 1000).toISOString(),
+      key: `stripe-refund:${refund.id}`,
+    };
+  });
 }
 
 /** Handles one Stripe webhook delivery for the store in the URL. */
@@ -173,9 +183,9 @@ export async function handleStripeWebhook(
     return { status: 200, outcome: { status: "duplicate" } };
 
   const { stripe } = await installations.stripe(installation);
-  let mapped: PaymentReport | { ignore: string };
+  let mapped: PaymentReport[] | { ignore: string };
   try {
-    mapped = await mapStripeEvent(deps, installations, installation, stripe, event);
+    mapped = await mapStripeEvent(deps, installation, stripe, event);
   } catch (error) {
     deps.log("error", "a Stripe event couldn't be read", { event: event.id, error: String(error) });
     return { status: 500, outcome: { status: "rejected", reason: "try again" } };
@@ -185,32 +195,41 @@ export async function handleStripeWebhook(
     return { status: 200, outcome: { status: "ignored", reason: mapped.ignore } };
   }
 
-  try {
-    await reportToHypha(installations, installation, mapped, event.id);
-  } catch (error) {
-    if (error instanceof ReportError && error.permanent) {
-      // A move the payment can't make (Hypha voided it already, …): retrying won't help.
-      deps.log("warn", "Hypha refused a payment report", {
+  // In order; a report Hypha has already (a refund it counted) changes nothing there.
+  const reported: PaymentReport[] = [];
+  let refused: string | undefined;
+  for (const report of mapped) {
+    try {
+      await reportToHypha(installations, installation, report, report.key);
+      reported.push(report);
+    } catch (error) {
+      if (error instanceof ReportError && error.permanent) {
+        // A move the payment can't make (Hypha voided it already, …): retrying won't help.
+        deps.log("warn", "Hypha refused a payment report", {
+          event: event.id,
+          payment: report.payment,
+          type: report.type,
+          error: error.message,
+        });
+        refused ??= error.code ?? "refused";
+        continue;
+      }
+      if (error instanceof NotInstalledError) {
+        await storage.markEvent(installation.row.id, "stripe", event.id, deps.now());
+        return { status: 200, outcome: { status: "ignored", reason: "not installed" } };
+      }
+      // Stripe delivers it again; what went through already changes nothing then.
+      deps.log("error", "reporting to Hypha failed; Stripe will retry", {
         event: event.id,
-        payment: mapped.payment,
-        type: mapped.type,
-        error: error.message,
+        error: String(error),
       });
-      await storage.markEvent(installation.row.id, "stripe", event.id, deps.now());
-      return { status: 200, outcome: { status: "ignored", reason: error.code ?? "refused" } };
+      return { status: 500, outcome: { status: "rejected", reason: "try again" } };
     }
-    if (error instanceof NotInstalledError) {
-      await storage.markEvent(installation.row.id, "stripe", event.id, deps.now());
-      return { status: 200, outcome: { status: "ignored", reason: "not installed" } };
-    }
-    deps.log("error", "reporting to Hypha failed; Stripe will retry", {
-      event: event.id,
-      error: String(error),
-    });
-    return { status: 500, outcome: { status: "rejected", reason: "try again" } };
   }
   await storage.markEvent(installation.row.id, "stripe", event.id, deps.now());
-  return { status: 200, outcome: { status: "reported", report: mapped } };
+  if (reported.length === 0)
+    return { status: 200, outcome: { status: "ignored", reason: refused ?? "refused" } };
+  return { status: 200, outcome: { status: "reported", reports: reported } };
 }
 
 function toStripeEvent(body: unknown): StripeEvent | undefined {

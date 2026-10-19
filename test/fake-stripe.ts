@@ -28,9 +28,22 @@ export interface RecordedRequest {
   authorization: string | null;
 }
 
+export interface FakeRefund {
+  id: string;
+  object: "refund";
+  amount: number;
+  status: string;
+  payment_intent: string;
+  charge: string | null;
+  currency: string;
+  created: number;
+}
+
 export interface FakeStripe {
   handle(request: Request): Promise<Response>;
   intents: Map<string, FakeIntent>;
+  /** Every refund made, oldest first; tests may add their own. */
+  refunds: FakeRefund[];
   requests: RecordedRequest[];
   /** Keys Stripe accepts (`sk_test_…`). */
   keys: Set<string>;
@@ -47,6 +60,7 @@ function error(status: number, type: string, message: string, code?: string) {
 
 export function createFakeStripe(options: { keys?: string[] } = {}): FakeStripe {
   const intents = new Map<string, FakeIntent>();
+  const refunds: FakeRefund[] = [];
   const requests: RecordedRequest[] = [];
   const idempotent = new Map<string, { status: number; body: unknown }>();
   const keys = new Set(options.keys ?? ["sk_test_fake000000000000"]);
@@ -129,22 +143,33 @@ export function createFakeStripe(options: { keys?: string[] } = {}): FakeStripe 
           "This PaymentIntent has no successful charge to refund.",
           "charge_not_refundable",
         );
-      return {
-        status: 200,
-        body: {
-          id: next("re"),
-          object: "refund",
-          amount: form.amount ? Number(form.amount) : intent.amount_received,
-          status: "succeeded",
-          payment_intent: intent.id,
-        },
+      const refund: FakeRefund = {
+        id: next("re"),
+        object: "refund",
+        amount: form.amount ? Number(form.amount) : intent.amount_received,
+        status: "succeeded",
+        payment_intent: intent.id,
+        charge: intent.latest_charge,
+        currency: intent.currency,
+        created: Math.floor(Date.now() / 1000) + refunds.length,
       };
+      refunds.push(refund);
+      return { status: 200, body: refund };
+    }
+    if (method === "GET" && path === "/v1/refunds") {
+      // Newest first, as Stripe lists; one page here.
+      const data = refunds
+        .filter((r) => !form.payment_intent || r.payment_intent === form.payment_intent)
+        .filter((r) => !form.charge || r.charge === form.charge)
+        .toReversed();
+      return { status: 200, body: { object: "list", data, has_more: false } };
     }
     return error(404, "invalid_request_error", `Unrecognized request URL (${method}: ${path})`);
   };
 
   return {
     intents,
+    refunds,
     requests,
     keys,
     succeed(id) {

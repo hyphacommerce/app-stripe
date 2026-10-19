@@ -82,8 +82,19 @@ export interface Refund {
   id: string;
   object: "refund";
   amount: number;
+  /** `pending`, `requires_action`, `succeeded`, `failed` or `canceled`. */
   status: string;
   payment_intent: string | null;
+  charge?: string | null;
+  currency?: string;
+  created: number;
+}
+
+/** A page of a Stripe list. */
+export interface StripeList<T> {
+  object: "list";
+  data: T[];
+  has_more: boolean;
 }
 
 export interface StripeEvent {
@@ -189,6 +200,27 @@ export class StripeClient {
 
   createRefund(params: FormObject, idempotencyKey: string): Promise<Refund> {
     return this.request("POST", "/v1/refunds", params, idempotencyKey);
+  }
+
+  /** Every refund of a PaymentIntent, oldest first (Stripe lists newest first, in pages
+   * of at most 100). */
+  async listRefunds(paymentIntent: string): Promise<Refund[]> {
+    const all: Refund[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page: StripeList<Refund> = await this.request("GET", "/v1/refunds", {
+        payment_intent: paymentIntent,
+        limit: 100,
+        ...(after ? { starting_after: after } : {}),
+      });
+      all.push(...page.data);
+      const last = page.data.at(-1);
+      if (!page.has_more || !last) break;
+      after = last.id;
+    }
+    return all.toSorted(
+      (a, b) => a.created - b.created || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
   }
 
   /** The account the key belongs to: checks a key when the merchant saves it. */

@@ -135,22 +135,24 @@ test("an intent that isn't a Hypha payment is ignored", async () => {
   assert.equal(h.hypha.events.length, 0);
 });
 
-test("charge.refunded reports the refund's own amount (read from GET /admin/payments/{id}), or refunded in full", async () => {
+test("charge.refunded reports each of the intent's refunds under its own ID, the one completing it as refunded", async () => {
   const h = await harness();
   const reference = await started(h);
-  h.hypha.orders.set("ord_0001", {
-    id: "ord_0001",
-    payments: [
-      {
-        id: "pay_0001",
-        provider: "app_stripe",
-        status: "partially_refunded",
-        reference,
-        amount: { amount: 1390, currency: "EUR" },
-        refunded: { amount: 300, currency: "EUR" },
-      },
-    ],
+  const refund = (id: string, amount: number, created: number, status = "succeeded") => ({
+    id,
+    object: "refund" as const,
+    amount,
+    status,
+    payment_intent: reference,
+    charge: "ch_1",
+    currency: "eur",
+    created,
   });
+  h.stripe.refunds.push(
+    refund("re_a", 300, 1),
+    refund("re_x", 50, 2, "failed"),
+    refund("re_b", 200, 3),
+  );
   const charge = (amountRefunded: number, refunded: boolean) => ({
     id: "ch_1",
     object: "charge",
@@ -160,29 +162,41 @@ test("charge.refunded reports the refund's own amount (read from GET /admin/paym
     currency: "eur",
     payment_intent: reference,
   });
-  await deliver(h, {
+  const first = await deliver(h, {
     id: "evt_r1",
     object: "event",
     type: "charge.refunded",
     created: 1,
     data: { object: charge(500, false) },
   });
+  assert.equal(first.status, 200);
+  h.stripe.refunds.push(refund("re_c", 890, 4));
   await deliver(h, {
     id: "evt_r2",
     object: "event",
     type: "charge.refunded",
-    created: 1,
+    created: 2,
     data: { object: charge(1390, true) },
   });
   assert.deepEqual(
-    h.hypha.events.map((e) => [e.body.type, e.body.amount]),
+    h.hypha.events.map((e) => [e.idempotencyKey, e.body.type, e.body.amount, e.body.reference]),
     [
-      ["partially_refunded", 200],
-      ["refunded", undefined],
+      // The first event: the two refunds so far (the failed one gave nothing back).
+      ["stripe-refund:re_a", "partially_refunded", 300, "re_a"],
+      ["stripe-refund:re_b", "partially_refunded", 200, "re_b"],
+      // The second sends all of them again, under the same keys (Hypha replays those,
+      // and counts each refund once by its ID anyway): only the new one is new, and it
+      // completes the charge.
+      ["stripe-refund:re_c", "refunded", 890, "re_c"],
     ],
   );
+  const sent = h.hypha.requests.filter((r) => r.path === "/admin/payments/pay_0001/events");
+  assert.equal(sent.length, 5, "every refund is sent each time");
+  // Read from Stripe by the intent, not from the charge Stripe sent.
   assert.ok(
-    h.hypha.requests.some((r) => r.method === "GET" && r.path === "/admin/payments/pay_0001"),
+    h.stripe.requests.some(
+      (r) => r.method === "GET" && r.path === "/v1/refunds" && r.form.payment_intent === reference,
+    ),
   );
 });
 

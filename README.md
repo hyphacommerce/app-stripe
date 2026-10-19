@@ -29,8 +29,12 @@ What it does:
   once per event, and reports them to Hypha (`POST /admin/payments/{id}/events`,
   `Idempotency-Key` = Stripe's event ID): `payment_intent.succeeded` → `paid`,
   `.amount_capturable_updated` → `authorized`, `.canceled` → `voided`,
-  `charge.refunded` → `refunded` / `partially_refunded` (that refund's amount: Stripe's
-  total less what `GET /admin/payments/{id}` says Hypha counted). Hypha's `failed` is
+  `charge.refunded` → one `partially_refunded` per refund of the intent
+  (`GET /v1/refunds?payment_intent=`, oldest first; failed and cancelled ones skipped),
+  with that refund's amount and its `re_…` as the `reference` and in the key, the one
+  completing a fully refunded charge `refunded`. Hypha counts a refund once by its ID,
+  so the refunds it has already change nothing and two events, however they race,
+  can't count one twice. Hypha's `failed` is
   final, so `.payment_failed` is reported only when the intent is over (`canceled`); a
   declined card leaves the intent waiting for another one, and the payment stays
   `pending` (the storefront's "Complete payment" starts it again under the same ID,
@@ -161,7 +165,8 @@ saves the settings with a session token, places an order through the storefront 
 checks that `payments.start` answered the element with the intent's client secret,
 delivers a signed `payment_intent.succeeded` and checks the order is paid, then a
 staff refund and `charge.refunded` (partially refunded), a second refund under Hypha's
-per-attempt key, `GET /admin/payments/{id}`, a declined card (nothing reported, the
+per-attempt key, a second `charge.refunded` and the first one again under a new event ID
+(each refund counted once), `GET /admin/payments/{id}`, a declined card (nothing reported, the
 payment stays pending), a cancelled order (Hypha's signed `order.cancelled` makes the
 app cancel the intent), the settings page's `?origin=`, the block, discovery and the
 element module.
