@@ -28,6 +28,12 @@ export interface FakeHypha {
   appSecret: string | undefined;
   tokenCalls: URLSearchParams[];
   issuedTokens: number;
+  /** Leaves `store` and `issuer` out of token answers, as Hypha did before 0029's fixes. */
+  legacyTokens: boolean;
+  /** The store's admin origins (`GET /admin/app-extensions/origins`). */
+  adminOrigins: string[];
+  /** Answers reads of orders with a 503. */
+  failOrders: boolean;
 }
 
 export interface Harness {
@@ -44,7 +50,7 @@ export interface Harness {
   extension(
     point: string,
     body: unknown,
-    options?: { store?: string; secret?: string },
+    options?: { store?: string; secret?: string; idempotencyKey?: string },
   ): Promise<Response>;
 }
 
@@ -58,6 +64,9 @@ export async function harness(): Promise<Harness> {
     appSecret: APP_SECRET,
     tokenCalls: [],
     issuedTokens: 0,
+    legacyTokens: false,
+    adminOrigins: ["https://admin.shop.test"],
+    failOrders: false,
   };
   const fakeHypha = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
@@ -83,16 +92,26 @@ export async function harness(): Promise<Harness> {
         expires_in: 3600,
         refresh_token: `hypha_rt_${hypha.issuedTokens}`,
         scope: "customer_data:email orders:read payments:write",
+        ...(hypha.legacyTokens ? {} : { store: STORE, issuer: API_URL }),
         ...(form.get("grant_type") === "authorization_code" && hypha.appSecret
           ? { app_secret: hypha.appSecret }
           : {}),
       });
     }
-    if (url.pathname === "/.well-known/oauth-authorization-server")
-      return Response.json({ issuer: API_URL });
     if (url.pathname === "/admin/app-extensions/origins")
-      return Response.json({ origins: ["https://admin.shop.test"] });
+      return Response.json({ origins: hypha.adminOrigins });
+    const payment = /^\/admin\/payments\/([^/]+)$/.exec(url.pathname);
+    if (payment?.[1] && request.method === "GET") {
+      for (const [orderId, order] of hypha.orders) {
+        const payments = (order.payments ?? []) as Record<string, unknown>[];
+        const found = payments.find((p) => p.id === payment[1]);
+        if (found) return Response.json({ ...found, order: orderId });
+      }
+      return Response.json({ code: "payment_not_found", error: "no" }, { status: 404 });
+    }
     const order = /^\/admin\/orders\/([^/]+)$/.exec(url.pathname);
+    if (order?.[1] && hypha.failOrders)
+      return Response.json({ code: "unavailable", error: "try later" }, { status: 503 });
     if (order?.[1]) {
       const found = hypha.orders.get(order[1]);
       return found
@@ -158,7 +177,12 @@ export async function harness(): Promise<Harness> {
           }),
           "hypha-extension": point,
           "hypha-extension-version": "1",
-          "idempotency-key": (body as { payment?: string }).payment ?? "key",
+          // Hypha's keys: the payment ID for a start, a new one per attempt otherwise.
+          "idempotency-key":
+            options.idempotencyKey ??
+            (point === "payments.start"
+              ? ((body as { payment?: string }).payment ?? "key")
+              : `${(body as { payment?: string }).payment}:${point.split(".")[1]}:${crypto.randomUUID()}`),
           "hypha-store": options.store ?? STORE,
         },
         body: raw,

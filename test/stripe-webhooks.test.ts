@@ -78,12 +78,34 @@ test("authorized, failed and canceled map to Hypha's moves", async () => {
   );
 });
 
-test("a failed payment is reported and its intent canceled at Stripe", async () => {
+test("a declined intent the shopper may retry reports nothing", async () => {
   const h = await harness();
   const reference = await started(h);
-  await deliver(h, intentEvent(h, "evt_f", "payment_intent.payment_failed", reference));
-  assert.equal(h.hypha.events[0]?.body.type, "failed");
-  assert.equal(h.stripe.intents.get(reference)?.status, "canceled");
+  const response = await deliver(
+    h,
+    intentEvent(h, "evt_f", "payment_intent.payment_failed", reference),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    status: "ignored",
+    reason: "the shopper may still pay this intent",
+  });
+  assert.equal(h.hypha.events.length, 0);
+  // The intent stays open for another card.
+  assert.equal(h.stripe.intents.get(reference)?.status, "requires_payment_method");
+  assert.equal(h.stripe.requests.filter((r) => r.path.endsWith("/cancel")).length, 0);
+});
+
+test("a failure that ends the intent reports failed", async () => {
+  const h = await harness();
+  const reference = await started(h);
+  const intent = h.stripe.intents.get(reference);
+  if (intent) intent.status = "canceled";
+  await deliver(h, intentEvent(h, "evt_f2", "payment_intent.payment_failed", reference));
+  assert.deepEqual(
+    h.hypha.events.map((e) => e.body.type),
+    ["failed"],
+  );
 });
 
 test("a bad signature is a 400 and nothing is reported", async () => {
@@ -113,7 +135,7 @@ test("an intent that isn't a Hypha payment is ignored", async () => {
   assert.equal(h.hypha.events.length, 0);
 });
 
-test("charge.refunded reports the refund's own amount, or refunded in full", async () => {
+test("charge.refunded reports the refund's own amount (read from GET /admin/payments/{id}), or refunded in full", async () => {
   const h = await harness();
   const reference = await started(h);
   h.hypha.orders.set("ord_0001", {
@@ -158,6 +180,9 @@ test("charge.refunded reports the refund's own amount, or refunded in full", asy
       ["partially_refunded", 200],
       ["refunded", undefined],
     ],
+  );
+  assert.ok(
+    h.hypha.requests.some((r) => r.method === "GET" && r.path === "/admin/payments/pay_0001"),
   );
 });
 

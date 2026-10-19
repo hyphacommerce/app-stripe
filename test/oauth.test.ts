@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { API_URL, APP_SECRET, APP_URL, harness } from "./helpers.ts";
+import { API_URL, APP_SECRET, APP_URL, harness, STORE } from "./helpers.ts";
 
 test("/install sends the browser to Hypha's authorize with PKCE", async () => {
   const h = await harness();
@@ -37,12 +37,30 @@ test("the callback trades the code (with the verifier) and stores the installati
   assert.ok(row);
   assert.equal(row.apiUrl, API_URL);
   assert.equal(row.issuer, API_URL);
-  assert.equal(row.storeId, null);
+  // Keyed by the store and issuer the token answer names.
+  assert.equal(row.storeId, STORE);
   assert.deepEqual(row.adminOrigins, ["https://admin.shop.test"]);
   assert.equal(row.scopes, "customer_data:email orders:read payments:write");
   assert.equal(row.appSecret.includes(APP_SECRET), false);
   assert.equal(row.tokens?.includes("hypha_at_"), false);
   assert.equal(await h.deps.sealer.open(row.appSecret, `${id}:app_secret`), APP_SECRET);
+});
+
+test("a token answer without store and issuer (an older Hypha) can't install", async () => {
+  const h = await harness();
+  h.hypha.legacyTokens = true;
+  await assert.rejects(h.install(), /502.*update Hypha/s);
+  assert.equal(await h.deps.storage.installationByStore(STORE), undefined);
+});
+
+test("the manifest's icon is served", async () => {
+  const h = await harness();
+  const manifest = (await (await h.call("/manifest.json")).json()) as Record<string, unknown>;
+  assert.equal(manifest.icon, "/icon.svg");
+  assert.equal("icon_url" in manifest, false);
+  const icon = await h.call("/icon.svg");
+  assert.equal(icon.status, 200);
+  assert.equal(icon.headers.get("content-type"), "image/svg+xml");
 });
 
 test("a state is used once", async () => {

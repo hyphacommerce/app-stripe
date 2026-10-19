@@ -8,9 +8,12 @@ export interface InstallationRow {
   id: string;
   /** The Hypha API's base URL the app calls (`https://api.shop.example`). */
   apiUrl: string;
-  /** The API's OAuth issuer (RFC 8414 metadata), as session tokens name it. */
+  /** The API's OAuth issuer, from the token answer, as session tokens name it. */
   issuer: string;
-  /** Hypha's store ID (`store_…`), learned from the first signed call that names it. */
+  /**
+   * Hypha's store ID (`store_…`), from the token answer. Null only in rows made before
+   * token answers named it: authorizing the app again binds it.
+   */
   storeId: string | null;
   /** Sealed: Hypha's app secret, which signs its calls and session tokens. */
   appSecret: string;
@@ -70,9 +73,12 @@ export interface Storage {
   installationByStore(storeId: string): Promise<InstallationRow | undefined>;
   /** Every installation that isn't uninstalled. */
   activeInstallations(): Promise<InstallationRow[]>;
-  /** Inserts or replaces the row with this ID. */
+  /**
+   * Inserts or replaces the row with this ID; a stale row holding its issuer or store
+   * (a reset deployment's) goes.
+   */
   putInstallation(row: InstallationRow): Promise<void>;
-  setStore(id: string, storeId: string): Promise<void>;
+  setAdminOrigins(id: string, origins: string[]): Promise<void>;
   setTokens(id: string, tokens: string | null, scopes?: string): Promise<void>;
   setSettings(id: string, settings: StoredSettings): Promise<void>;
   markUninstalled(id: string, at: number): Promise<void>;

@@ -182,21 +182,17 @@ export async function fromSessionToken(
   const header = request.headers.get("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!token) return undefined;
-  const claims = unverifiedClaims(token);
-  let scopes: string[] = [];
-  const installation = await installations.resolve(
-    async (secret) => {
-      try {
-        scopes = (await verifySessionToken(token, secret, { audience: APP_KEY })).scopes;
-        return true;
-      } catch (error) {
-        if (error instanceof SessionTokenError) return false;
-        throw error;
-      }
-    },
-    { store: claims.store, issuer: claims.iss },
-  );
-  return installation ? { installation, scopes } : undefined;
+  // The `store` claim picks the secret; verifying with it proves the claim.
+  const installation = await installations.byStore(unverifiedStore(token));
+  if (!installation) return undefined;
+  try {
+    const claims = await verifySessionToken(token, installation.appSecret, { audience: APP_KEY });
+    if (claims.store !== installation.row.storeId) return undefined;
+    return { installation, scopes: claims.scopes };
+  } catch (error) {
+    if (error instanceof SessionTokenError) return undefined;
+    throw error;
+  }
 }
 
 /** The installation and scopes of a call Hypha forwarded through the admin proxy. */
@@ -205,11 +201,9 @@ export async function fromProxy(
   request: Request,
   rawBody: Uint8Array,
 ): Promise<{ installation: Installation; scopes: string[] } | undefined> {
-  const installation = await installations.resolve(
-    (secret) => verifyForwardedRequest(secret, request, rawBody),
-    { store: request.headers.get(STORE_HEADER) },
-  );
-  if (!installation) return undefined;
+  const installation = await installations.byStore(request.headers.get(STORE_HEADER));
+  if (!installation || !(await verifyForwardedRequest(installation.appSecret, request, rawBody)))
+    return undefined;
   const scopes = (request.headers.get("hypha-scopes") ?? "").split(/[ ,]+/).filter(Boolean);
   return { installation, scopes };
 }
@@ -222,38 +216,36 @@ export function canWrite(scopes: string[]): boolean {
   return scopes.includes("payments:write");
 }
 
-/** Hints only (the store, the issuer): verified by the secret that checks the signature. */
-function unverifiedClaims(token: string): { store?: string; iss?: string } {
+/** A session token's `store` claim, unverified: it only picks the secret to verify with. */
+function unverifiedStore(token: string): string | undefined {
   const payload = token.split(".")[1];
   const bytes = payload ? fromBase64Url(payload) : undefined;
-  if (!bytes) return {};
+  if (!bytes) return undefined;
   try {
     const claims: unknown = JSON.parse(new TextDecoder().decode(bytes));
-    if (!isRecord(claims)) return {};
-    return {
-      store: typeof claims.store === "string" ? claims.store : undefined,
-      iss: typeof claims.iss === "string" ? claims.iss : undefined,
-    };
+    return isRecord(claims) && typeof claims.store === "string" ? claims.store : undefined;
   } catch {
-    return {};
+    return undefined;
   }
 }
 
 /**
- * The settings page, framed by the admin. Which admin is framing it comes from
- * `?host_origin=` or the `Referer`, and must be one of the installed stores' admin
- * origins: that one origin is the page's `frame-ancestors` and the bridge's peer.
+ * The settings page, framed by the admin. The admin names itself in `?origin=` (the
+ * Referer when it's missing): only a claim, so it must be one of the installed stores'
+ * admin origins (`GET /admin/app-extensions/origins`, kept at install and read again,
+ * now and then, for an origin not known yet). That one origin is the page's
+ * `frame-ancestors` and the bridge's peer.
  */
 export async function settingsPage(
   deps: Deps,
+  installations: Installations,
   request: Request,
 ): Promise<{ html: string; frameAncestors: string }> {
-  const known = new Set(
-    (await deps.storage.activeInstallations()).flatMap((row) => row.adminOrigins),
-  );
+  const rows = await deps.storage.activeInstallations();
+  let known = new Set(rows.flatMap((row) => row.adminOrigins));
   const url = new URL(request.url);
   const referer = request.headers.get("referer");
-  let candidate = url.searchParams.get("host_origin") ?? undefined;
+  let candidate = url.searchParams.get("origin") ?? undefined;
   if (!candidate && referer) {
     try {
       candidate = new URL(referer).origin;
@@ -261,6 +253,9 @@ export async function settingsPage(
       candidate = undefined;
     }
   }
+  // A store's admin may have moved since the install.
+  if (candidate && !known.has(candidate) && (await installations.refreshAllAdminOrigins()))
+    known = new Set((await deps.storage.activeInstallations()).flatMap((row) => row.adminOrigins));
   const hostOrigin = candidate && known.has(candidate) ? candidate : null;
   const frameAncestors = hostOrigin ?? ([...known].join(" ") || "'none'");
   const html = page(

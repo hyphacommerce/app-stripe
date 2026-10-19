@@ -7,19 +7,10 @@ import { NotInstalledError } from "@hypha/app";
 
 import type { Deps } from "./config.ts";
 import type { Installation, Installations } from "./installations.ts";
+import { fetchPayment } from "./hypha-api.ts";
 import { fromStripeAmount } from "./stripe/amounts.ts";
-import {
-  bool,
-  isRecord,
-  type JsonObject,
-  num,
-  parseJson,
-  readJson,
-  rec,
-  str,
-  strings,
-} from "./json.ts";
-import { type StripeClient, StripeError, type StripeEvent } from "./stripe/api.ts";
+import { bool, isRecord, num, parseJson, rec, str, strings } from "./json.ts";
+import type { StripeClient, StripeEvent } from "./stripe/api.ts";
 import { STRIPE_SIGNATURE_HEADER, verifyStripeSignature } from "./stripe/signature.ts";
 
 export type PaymentEventType =
@@ -108,6 +99,11 @@ export async function mapStripeEvent(
         if (!num(object, "amount_capturable")) return { ignore: "nothing capturable" };
         return { ...base, type: "authorized" };
       case "payment_intent.payment_failed":
+        // Hypha's `failed` is final; Stripe's attempt usually isn't: a declined intent
+        // goes back to `requires_payment_method` and the shopper may try another card on
+        // it. Only an intent that can't take money any more failed for Hypha.
+        if (str(object, "status") !== "canceled")
+          return { ignore: "the shopper may still pay this intent" };
         return { ...base, type: "failed" };
       case "payment_intent.canceled":
         return { ...base, type: "voided" };
@@ -128,7 +124,7 @@ export async function mapStripeEvent(
       num(object, "amount_refunded") ?? 0,
       str(object, "currency") ?? "",
     );
-    const already = await refundedInHypha(deps, installations, installation, payment);
+    const already = await refundedInHypha(installations, installation, payment);
     const amount = total - already;
     if (amount <= 0) return { ignore: "Hypha has this refund already" };
     return { ...base, type: "partially_refunded", amount };
@@ -136,77 +132,15 @@ export async function mapStripeEvent(
   return { ignore: `${event.type} isn't handled` };
 }
 
-/** How much Hypha has counted as refunded on a payment, read through its order. */
+/** How much Hypha has counted as refunded on a payment. */
 async function refundedInHypha(
-  deps: Deps,
   installations: Installations,
   installation: Installation,
   paymentId: string,
 ): Promise<number> {
-  const row = await deps.storage.paymentById(installation.row.id, paymentId);
-  const order = row ? await fetchOrder(installations, installation, row.orderId) : undefined;
-  const payment = order?.payments?.find((p) => p.id === paymentId);
-  return payment?.refunded?.amount ?? 0;
-}
-
-export interface OrderPayments {
-  id: string;
-  payments?: {
-    id: string;
-    provider: string;
-    status: string;
-    reference?: string | null;
-    amount: { amount: number; currency: string };
-    refunded?: { amount: number; currency: string };
-  }[];
-}
-
-export async function fetchOrder(
-  installations: Installations,
-  installation: Installation,
-  orderId: string,
-): Promise<OrderPayments | undefined> {
-  const response = await installations
-    .client(installation)
-    .fetch(`/admin/orders/${encodeURIComponent(orderId)}`);
-  if (!response.ok) return undefined;
-  return toOrderPayments(await readJson(response));
-}
-
-/** A `Money` field, when it is one. */
-function money(o: JsonObject, key: string): { amount: number; currency: string } | undefined {
-  const m = rec(o, key);
-  const amount = m ? num(m, "amount") : undefined;
-  const currency = m ? str(m, "currency") : undefined;
-  return amount === undefined || currency === undefined ? undefined : { amount, currency };
-}
-
-/** The order's payments as far as the app reads them. */
-function toOrderPayments(body: unknown): OrderPayments | undefined {
-  if (!isRecord(body)) return undefined;
-  const id = str(body, "id");
-  if (!id) return undefined;
-  const payments = (Array.isArray(body.payments) ? body.payments : []).flatMap((p: unknown) => {
-    if (!isRecord(p)) return [];
-    const [pid, provider, status, amount] = [
-      str(p, "id"),
-      str(p, "provider"),
-      str(p, "status"),
-      money(p, "amount"),
-    ];
-    if (!pid || !provider || !status || !amount) return [];
-    return [
-      {
-        id: pid,
-        provider,
-        status,
-        reference: str(p, "reference") ?? null,
-        amount,
-        refunded: money(p, "refunded"),
-      },
-    ];
-  });
-  return { id, payments };
+  const payment = await fetchPayment(installations, installation, paymentId);
+  if (!payment) throw new Error(`Hypha has no payment ${paymentId}`);
+  return payment.refunded.amount;
 }
 
 /** Handles one Stripe webhook delivery for the store in the URL. */
@@ -276,22 +210,6 @@ export async function handleStripeWebhook(
     return { status: 500, outcome: { status: "rejected", reason: "try again" } };
   }
   await storage.markEvent(installation.row.id, "stripe", event.id, deps.now());
-
-  // Hypha's `failed` is final, Stripe's isn't (the buyer may try another card on the
-  // same intent). Cancel the intent so the two agree: the storefront starts a new
-  // payment (`POST /storefront/orders/{id}/payment`), with a new intent.
-  if (mapped.type === "failed") {
-    await stripe
-      .cancelPaymentIntent(
-        mapped.reference ?? "",
-        { cancellation_reason: "abandoned" },
-        `${event.id}:cancel`,
-      )
-      .catch((error: unknown) => {
-        if (!(error instanceof StripeError && error.isRefusal))
-          deps.log("warn", "canceling a failed intent failed", { error: String(error) });
-      });
-  }
   return { status: 200, outcome: { status: "reported", report: mapped } };
 }
 

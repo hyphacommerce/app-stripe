@@ -174,17 +174,38 @@ test("the admin proxy saves settings when Hypha signed the call", async () => {
   );
 });
 
-test("the settings page is framed only by the store's admin", async () => {
+test("the settings page trusts ?origin= only when it's the store's admin", async () => {
   const h = await harness();
   await h.install();
-  const response = await h.call("/admin/settings", {
-    headers: { referer: "https://admin.shop.test/apps/app_stripe" },
-  });
+  const response = await h.call(
+    `/admin/settings?origin=${encodeURIComponent("https://admin.shop.test")}`,
+  );
   assert.match(
     response.headers.get("content-security-policy") ?? "",
     /frame-ancestors https:\/\/admin\.shop\.test$/,
   );
   assert.match(await response.text(), /data-host-origin="https:\/\/admin\.shop\.test"/);
-  const stranger = await h.call("/admin/settings?host_origin=https://evil.test");
+  const stranger = await h.call("/admin/settings?origin=https://evil.test");
   assert.match(await stranger.text(), /data-host-origin=""/);
+  // Without the parameter, the Referer is the claim.
+  const referred = await h.call("/admin/settings", {
+    headers: { referer: "https://admin.shop.test/apps/app_stripe" },
+  });
+  assert.match(await referred.text(), /data-host-origin="https:\/\/admin\.shop\.test"/);
+});
+
+test("an admin origin added after the install is read again from Hypha, now and then", async () => {
+  const h = await harness();
+  await h.install();
+  h.hypha.adminOrigins = ["https://admin.shop.test", "https://new-admin.shop.test"];
+  const origins = () =>
+    h.hypha.requests.filter((r) => r.path === "/admin/app-extensions/origins").length;
+  const before = origins();
+  const moved = await h.call("/admin/settings?origin=https://new-admin.shop.test");
+  assert.match(await moved.text(), /data-host-origin="https:\/\/new-admin\.shop\.test"/);
+  assert.equal(origins(), before + 1);
+  // Strangers' origins don't make the app ask Hypha on every request.
+  await h.call("/admin/settings?origin=https://evil.test");
+  await h.call("/admin/settings?origin=https://evil2.test");
+  assert.equal(origins(), before + 1);
 });

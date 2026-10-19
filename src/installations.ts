@@ -1,16 +1,15 @@
 // Installations: which Hypha store a call is for, its secrets, and a client for its API.
 //
 // One app instance serves many Hypha deployments (each a store). An installation is
-// keyed by its API's OAuth issuer, and by its store ID once known. Hypha's token answer
-// carries no store ID, and its webhooks no `Hypha-Store` header, so the store is learned
-// from the first signed call that names one, and a call whose store isn't known yet is
-// matched by the secret that verifies its signature (each installation has its own).
+// keyed by the store ID Hypha's token answer names (`store`), which every signed call
+// repeats in `Hypha-Store` (extension calls, blocks, the admin proxy, webhooks) and
+// session tokens in their `store` claim: the store picks the secret, then the signature
+// is checked with it.
 
 import {
   HyphaClient,
   NotInstalledError,
   OAuthError,
-  refresh,
   type TokenSet,
   type TokenStore,
 } from "@hypha/app";
@@ -41,15 +40,20 @@ export class NotConfiguredError extends Error {
   }
 }
 
-/** Refresh access tokens this long before they expire (more than the client's margin). */
+/** Refresh access tokens this long before they expire. */
 const REFRESH_MARGIN_MS = 2 * 60_000;
 /** How long one refresh may hold the lock. */
 const LOCK_MS = 15_000;
+/** How often a refresh waiting for the lock tries again. */
+const LOCK_POLL_MS = 200;
+/** Admin origins are read again for an unknown `?origin=` at most this often. */
+const ORIGINS_REFRESH_MS = 5 * 60_000;
 
 export class Installations {
   readonly #deps: Deps;
   /** One client per installation, so refreshes are single-flight within this isolate. */
   readonly #clients = new Map<string, HyphaClient>();
+  #originsRefreshedAt = Number.NEGATIVE_INFINITY;
 
   constructor(deps: Deps) {
     this.#deps = deps;
@@ -59,51 +63,22 @@ export class Installations {
     return { row, appSecret: await this.#deps.sealer.open(row.appSecret, `${row.id}:app_secret`) };
   }
 
-  /**
-   * The installation whose secret `verify` accepts: the one with `hint.store` (or
-   * `hint.issuer`) first, then every other active one. Binds the store ID when the hint
-   * names one. `undefined` when no secret verifies.
-   */
-  async resolve(
-    verify: (secret: string) => Promise<boolean>,
-    hint: { store?: string | null; issuer?: string | null } = {},
-  ): Promise<Installation | undefined> {
-    const { storage } = this.#deps;
-    const candidates: InstallationRow[] = [];
-    const seen = new Set<string>();
-    const add = (row: InstallationRow | undefined) => {
-      if (row && row.uninstalledAt === null && !seen.has(row.id)) {
-        seen.add(row.id);
-        candidates.push(row);
-      }
-    };
-    if (hint.store) add(await storage.installationByStore(hint.store));
-    if (hint.issuer) add(await storage.installationByIssuer(hint.issuer));
-    // Only installations whose store isn't known yet can be the hinted store's.
-    const others = await storage.activeInstallations();
-    for (const row of others) if (!hint.store || row.storeId === null) add(row);
-
-    for (const row of candidates) {
-      let installation: Installation;
-      try {
-        installation = await this.open(row);
-      } catch {
-        this.#deps.log("error", "an installation's secret doesn't open", { installation: row.id });
-        continue;
-      }
-      if (!(await verify(installation.appSecret))) continue;
-      if (hint.store && row.storeId !== hint.store) {
-        await storage.setStore(row.id, hint.store);
-        installation.row = { ...row, storeId: hint.store };
-      }
-      return installation;
+  /** The active installation for a store (`Hypha-Store`, a session token's `store`). */
+  async byStore(storeId: string | null | undefined): Promise<Installation | undefined> {
+    if (!storeId) return undefined;
+    const row = await this.#deps.storage.installationByStore(storeId);
+    if (!row || row.uninstalledAt !== null) return undefined;
+    try {
+      return await this.open(row);
+    } catch {
+      this.#deps.log("error", "an installation's secret doesn't open", { installation: row.id });
+      return undefined;
     }
-    return undefined;
   }
 
-  async byStore(storeId: string): Promise<Installation | undefined> {
-    const row = await this.#deps.storage.installationByStore(storeId);
-    return row && row.uninstalledAt === null ? this.open(row) : undefined;
+  /** The store's app secret, for the SDK's `secret` callbacks. */
+  async secretOf(storeId: string | null | undefined): Promise<string | undefined> {
+    return (await this.byStore(storeId))?.appSecret;
   }
 
   /** A client for the installation's admin API, authenticated as the app. */
@@ -117,10 +92,48 @@ export class Installations {
         tokens: this.#tokenStore(row),
         fetch: this.#deps.fetch,
         now: this.#deps.now,
+        refreshMarginMs: REFRESH_MARGIN_MS,
       });
       this.#clients.set(row.id, client);
     }
     return client;
+  }
+
+  /**
+   * The store's admin origins read again (`GET /admin/app-extensions/origins`) and kept;
+   * `undefined` when Hypha can't be asked.
+   */
+  async refreshAdminOrigins(installation: Installation): Promise<string[] | undefined> {
+    try {
+      const response = await this.client(installation).fetch("/admin/app-extensions/origins");
+      if (!response.ok) return undefined;
+      const body = parseJson(await response.text());
+      const origins = isRecord(body) ? body.origins : undefined;
+      if (!Array.isArray(origins)) return undefined;
+      const list = origins.filter((o): o is string => typeof o === "string");
+      await this.#deps.storage.setAdminOrigins(installation.row.id, list);
+      installation.row = { ...installation.row, adminOrigins: list };
+      return list;
+    } catch (error) {
+      this.#deps.log("warn", "reading the admin origins failed", { error: String(error) });
+      return undefined;
+    }
+  }
+
+  /**
+   * Every active installation's admin origins read again, at most every
+   * `ORIGINS_REFRESH_MS` (an unknown `?origin=` costs strangers nothing more); whether
+   * it ran.
+   */
+  async refreshAllAdminOrigins(): Promise<boolean> {
+    const now = this.#deps.now();
+    if (now - this.#originsRefreshedAt < ORIGINS_REFRESH_MS) return false;
+    this.#originsRefreshedAt = now;
+    for (const row of await this.#deps.storage.activeInstallations()) {
+      const installation = await this.open(row).catch(() => undefined);
+      if (installation) await this.refreshAdminOrigins(installation);
+    }
+    return true;
   }
 
   /** Forgets cached clients (after an uninstall or a reinstall). */
@@ -129,64 +142,49 @@ export class Installations {
   }
 
   /**
-   * A `TokenStore` that refreshes under a lock in storage. Hypha's refresh tokens rotate
-   * and a reused one revokes the grant, so two isolates (or processes) must never
-   * refresh the same token: `get` refreshes early, holding the lock, and the others wait
-   * for the new tokens instead.
+   * The installation's tokens, sealed in storage, with a lock in storage around
+   * `HyphaClient`'s refreshes (`withLock`). Hypha's refresh tokens rotate and a reused one
+   * revokes the grant, so two isolates (or processes) must never refresh the same token:
+   * the client refreshes inside the lock and reads the tokens again first, so one that
+   * waited uses the pair the other stored.
    */
   #tokenStore(row: InstallationRow): TokenStore {
-    const { storage, sealer, now, config, fetch } = this.#deps;
+    const { storage, sealer, now } = this.#deps;
     const context = `${row.id}:tokens`;
-    const read = async (): Promise<TokenSet | undefined> => {
-      const current = await storage.getInstallation(row.id);
-      if (!current?.tokens || current.uninstalledAt !== null) return undefined;
-      return toTokenSet(parseJson(await sealer.open(current.tokens, context)));
-    };
-    const write = async (tokens: TokenSet) => {
-      await storage.setTokens(
-        row.id,
-        await sealer.seal(JSON.stringify(tokens), context),
-        tokens.scopes.join(" "),
-      );
-    };
-    const fresh = (tokens: TokenSet) => tokens.expiresAt - REFRESH_MARGIN_MS > now();
     return {
       get: async () => {
-        const tokens = await read();
-        if (!tokens || fresh(tokens)) return tokens;
-        const deadline = now() + LOCK_MS;
-        while (now() < deadline) {
-          if (await storage.takeRefreshLock(row.id, now(), now() + LOCK_MS)) {
-            try {
-              const latest = await read();
-              if (!latest || fresh(latest)) return latest;
-              const next = await refresh({
-                apiUrl: row.apiUrl,
-                manifestUrl: config.manifestUrl,
-                refreshToken: latest.refreshToken,
-                fetch,
-                now,
-              });
-              await write(next);
-              return next;
-            } catch (error) {
-              if (error instanceof OAuthError && error.code === "invalid_grant") {
-                // The grant is gone (uninstalled, or revoked): reinstall to get tokens.
-                await storage.setTokens(row.id, null);
-                throw new NotInstalledError();
-              }
-              throw error;
-            } finally {
-              await storage.releaseRefreshLock(row.id);
-            }
-          }
-          await new Promise((resolve) => setTimeout(resolve, 200));
-          const latest = await read();
-          if (!latest || fresh(latest)) return latest;
-        }
-        return read();
+        const current = await storage.getInstallation(row.id);
+        if (!current?.tokens || current.uninstalledAt !== null) return undefined;
+        return toTokenSet(parseJson(await sealer.open(current.tokens, context)), current);
       },
-      set: write,
+      set: async (tokens) => {
+        await storage.setTokens(
+          row.id,
+          await sealer.seal(JSON.stringify(tokens), context),
+          tokens.scopes.join(" "),
+        );
+      },
+      withLock: async <T>(_key: string, fn: () => Promise<T>): Promise<T> => {
+        // Whoever holds it finishes, or its lock lapses, within `LOCK_MS`.
+        for (let wait = 0; !(await storage.takeRefreshLock(row.id, now(), now() + LOCK_MS));) {
+          if (wait >= LOCK_MS) throw new Error("the token refresh lock is held too long");
+          await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+          wait += LOCK_POLL_MS;
+        }
+        try {
+          return await fn();
+        } catch (error) {
+          if (error instanceof OAuthError && error.code === "invalid_grant") {
+            // The grant is gone (uninstalled, or revoked): reinstall to get tokens.
+            await storage.setTokens(row.id, null);
+            this.forget(row.id);
+            throw new NotInstalledError();
+          }
+          throw error;
+        } finally {
+          await storage.releaseRefreshLock(row.id);
+        }
+      },
     };
   }
 
@@ -234,8 +232,11 @@ export class Installations {
   }
 }
 
-/** Stored tokens back as a `TokenSet` (`undefined` if they don't read as one). */
-function toTokenSet(value: unknown): TokenSet | undefined {
+/**
+ * Stored tokens back as a `TokenSet` (`undefined` if they don't read as one). Pairs
+ * stored before token answers named the store and issuer take the row's.
+ */
+function toTokenSet(value: unknown, row: InstallationRow): TokenSet | undefined {
   if (!isRecord(value)) return undefined;
   const accessToken = str(value, "accessToken");
   const refreshToken = str(value, "refreshToken");
@@ -244,5 +245,7 @@ function toTokenSet(value: unknown): TokenSet | undefined {
   const scopes = Array.isArray(value.scopes)
     ? value.scopes.filter((s): s is string => typeof s === "string")
     : [];
-  return { accessToken, refreshToken, expiresAt, scopes };
+  const store = str(value, "store") ?? row.storeId ?? "";
+  const issuer = str(value, "issuer") ?? row.issuer;
+  return { accessToken, refreshToken, expiresAt, scopes, store, issuer };
 }

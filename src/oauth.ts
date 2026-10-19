@@ -12,7 +12,7 @@ import {
 
 import type { Deps } from "./config.ts";
 import { randomId } from "./crypto.ts";
-import { isRecord, readJson, str } from "./json.ts";
+import { isRecord, readJson } from "./json.ts";
 import type { Installations } from "./installations.ts";
 import { SCOPES } from "./manifest.ts";
 import { page, escapeHtml } from "./html.ts";
@@ -105,14 +105,23 @@ export async function finishInstall(
       now: deps.now,
     });
   } catch (error) {
+    if (error instanceof OAuthError && error.code === "invalid_response")
+      // The SDK refuses an answer without `store` and `issuer` (a Hypha before 0029's fixes).
+      throw new InstallError(
+        `Hypha's token answer isn't one this app reads (${error.message}): update Hypha.`,
+        502,
+      );
     if (error instanceof OAuthError)
       throw new InstallError(`Hypha refused the code (${error.code}): start again.`, 502);
     throw error;
   }
 
-  const issuer = await discoverIssuer(deps, state.apiUrl);
+  // The token answer names the store and the issuer: the installation's keys.
+  const { store, issuer } = tokens;
   const adminOrigins = await adminOriginsOf(deps, state.apiUrl, tokens.accessToken);
-  const existing = await deps.storage.installationByIssuer(issuer);
+  const existing =
+    (await deps.storage.installationByStore(store)) ??
+    (await deps.storage.installationByIssuer(issuer));
   const now = deps.now();
   const id = existing?.id ?? randomId("inst");
   const secret = tokens.appSecret
@@ -129,9 +138,7 @@ export async function finishInstall(
     id,
     apiUrl: state.apiUrl,
     issuer,
-    // A new secret means a new installation in Hypha (a reset deployment, perhaps): its
-    // store is learned again from its first call.
-    storeId: tokens.appSecret ? null : (existing?.storeId ?? null),
+    storeId: store,
     appSecret: secret,
     tokens: await deps.sealer.seal(JSON.stringify(tokens), `${id}:tokens`),
     scopes: tokens.scopes.join(" "),
@@ -144,23 +151,13 @@ export async function finishInstall(
   };
   await deps.storage.putInstallation(row);
   installations.forget(id);
-  deps.log("info", "installed", { installation: id, issuer, first: Boolean(tokens.appSecret) });
+  deps.log("info", "installed", {
+    installation: id,
+    store,
+    issuer,
+    first: Boolean(tokens.appSecret),
+  });
   return { row, firstInstall: !existing || existing.uninstalledAt !== null };
-}
-
-/** The API's issuer, as its session tokens name it (RFC 8414); its origin otherwise. */
-async function discoverIssuer(deps: Deps, apiUrl: string): Promise<string> {
-  try {
-    const response = await deps.fetch(new URL("/.well-known/oauth-authorization-server", apiUrl));
-    if (response.ok) {
-      const body = await readJson(response);
-      const issuer = isRecord(body) ? str(body, "issuer") : undefined;
-      if (issuer) return issuer.replace(/\/+$/, "");
-    }
-  } catch {
-    // Fall back to the URL the merchant gave.
-  }
-  return apiUrl;
 }
 
 /** The store's admin origins (`GET /admin/app-extensions/origins`), for frame-ancestors. */

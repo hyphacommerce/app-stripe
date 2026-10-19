@@ -12,6 +12,7 @@ export const SCOPES = ["payments:write", "orders:read", "customer_data:email"] a
 export const PATHS = {
   callback: "/oauth/callback",
   privacy: "/privacy",
+  icon: "/icon.svg",
   hyphaWebhooks: "/hypha/webhooks",
   start: "/hypha/payments/start",
   capture: "/hypha/payments/capture",
@@ -25,6 +26,9 @@ export const PATHS = {
 
 export const ELEMENT_TAG = "stripe-payment";
 
+/** The manifest's `icon`: a card on Stripe's purple, square. */
+export const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"><rect width="64" height="64" rx="14" fill="#635bff"/><rect x="12" y="19" width="40" height="27" rx="4" fill="#fff"/><rect x="12" y="25" width="40" height="5" fill="#0a2540"/><rect x="17" y="36" width="12" height="4" rx="2" fill="#635bff"/></svg>`;
+
 export function manifest(appUrl: string): AppManifest {
   return defineManifest({
     $schema: MANIFEST_SCHEMA_URL,
@@ -32,6 +36,7 @@ export function manifest(appUrl: string): AppManifest {
     name: "Stripe",
     version: APP_VERSION,
     publisher: "Hypha",
+    icon: PATHS.icon,
     app_url: appUrl,
     redirect_uris: [PATHS.callback],
     scopes: [...SCOPES],

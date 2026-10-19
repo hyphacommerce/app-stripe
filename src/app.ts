@@ -7,9 +7,9 @@ import { handleBlock } from "./block.ts";
 import type { Deps } from "./config.ts";
 import { paymentElement, settingsScript } from "./generated/assets.ts";
 import { escapeHtml, page } from "./html.ts";
-import { handleHyphaWebhook } from "./hypha-webhooks.ts";
+import { hyphaWebhooks } from "./hypha-webhooks.ts";
 import { Installations } from "./installations.ts";
-import { manifest, PATHS } from "./manifest.ts";
+import { ICON_SVG, manifest, PATHS } from "./manifest.ts";
 import { finishInstall, InstallError, installedPage, installPage, startInstall } from "./oauth.ts";
 import { paymentHandlers } from "./payments.ts";
 import {
@@ -28,6 +28,7 @@ export function createApp(deps: Deps): Hono {
   const app = new Hono();
   const installations = new Installations(deps);
   const payments = paymentHandlers(deps, installations);
+  const webhooks = hyphaWebhooks(deps, installations);
 
   app.onError((err) => {
     deps.log("error", "unhandled error", { error: String(err), stack: err.stack });
@@ -41,6 +42,19 @@ export function createApp(deps: Deps): Hono {
     Response.json(manifest(deps.config.appUrl), {
       headers: { "access-control-allow-origin": "*", "cache-control": "public, max-age=60" },
     }),
+  );
+  app.get(
+    PATHS.icon,
+    () =>
+      new Response(ICON_SVG, {
+        headers: {
+          "content-type": "image/svg+xml",
+          "cache-control": "public, max-age=86400",
+          "access-control-allow-origin": "*",
+          "cross-origin-resource-policy": "cross-origin",
+          "x-content-type-options": "nosniff",
+        },
+      }),
   );
   app.get(PATHS.privacy, () =>
     html(
@@ -80,10 +94,7 @@ export function createApp(deps: Deps): Hono {
   // ---------- Hypha calls the app ----------
   for (const path of [PATHS.start, PATHS.capture, PATHS.void, PATHS.refund])
     app.all(path, (c) => payments(c.req.raw));
-  app.post(PATHS.hyphaWebhooks, async (c) => {
-    const { status, outcome } = await handleHyphaWebhook(deps, installations, c.req.raw);
-    return Response.json({ outcome }, { status });
-  });
+  app.post(PATHS.hyphaWebhooks, (c) => webhooks(c.req.raw));
   app.get(PATHS.paymentBlock, (c) => handleBlock(deps, installations, c.req.raw));
 
   // ---------- Stripe calls the app ----------
@@ -99,7 +110,7 @@ export function createApp(deps: Deps): Hono {
 
   // ---------- the merchant's settings ----------
   app.get(PATHS.settingsPage, async (c) => {
-    const { html: body, frameAncestors } = await settingsPage(deps, c.req.raw);
+    const { html: body, frameAncestors } = await settingsPage(deps, installations, c.req.raw);
     return html(body, 200, {
       "content-security-policy": `default-src 'self'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors ${frameAncestors}`,
     });

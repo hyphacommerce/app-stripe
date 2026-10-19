@@ -282,6 +282,24 @@ try {
     callback.status === 200 && callback.text.includes("Stripe is installed"),
     callback.text.slice(0, 500),
   );
+  const settingsPage = await http(
+    "GET",
+    `${APP}/admin/settings?origin=${encodeURIComponent("http://admin.e2e.localhost")}`,
+  );
+  check(
+    "the settings page trusts ?origin= as the store's admin (GET /admin/app-extensions/origins)",
+    settingsPage.text.includes('data-host-origin="http://admin.e2e.localhost"') &&
+      (settingsPage.headers.get("content-security-policy") ?? "").includes(
+        "frame-ancestors http://admin.e2e.localhost",
+      ),
+    settingsPage.headers.get("content-security-policy"),
+  );
+  const strangerPage = await http("GET", `${APP}/admin/settings?origin=https://evil.example`);
+  check(
+    "and not a stranger's",
+    strangerPage.text.includes('data-host-origin=""'),
+    strangerPage.text.slice(0, 300),
+  );
   const appInfo = await admin("GET", "/admin/apps/app_stripe");
   check(
     "Hypha shows the grant",
@@ -316,7 +334,12 @@ try {
     !saved.text.includes(stripeKeys.secret) && !saved.text.includes(WEBHOOK_SECRET),
   );
   const store = text(at(saved.body, "store") ?? "");
-  check("the store is known from the session token", store.startsWith("store_"), saved.body);
+  check(
+    "the installation is keyed by the store the token answer named",
+    store.startsWith("store_") &&
+      text(at(saved.body, "webhook_url")) === `${APP}/stripe/webhook/${store}`,
+    saved.body,
+  );
 
   // ---------- a store to sell in ----------
   const market = await admin("POST", "/admin/markets", {
@@ -576,6 +599,36 @@ try {
     { financial_status: at(order3.body, "financial_status"), payment: after },
   );
 
+  // A second refund without an Idempotency-Key: Hypha sends a new key per attempt.
+  const refund2 = await admin("POST", `/admin/payments/${paymentId}/refund`, { amount: 100 });
+  check(
+    "a second refund, without a key of staff's own: accepted (202)",
+    refund2.status === 202,
+    refund2.body,
+  );
+  if (!REAL_STRIPE) {
+    const refundKeys = fake.requests
+      .filter((r) => r.path === "/v1/refunds")
+      .map((r) => r.idempotencyKey ?? "");
+    check(
+      "each refund reached Stripe under its own key, Hypha's per attempt",
+      refundKeys.length === 2 &&
+        refundKeys[0] !== refundKeys[1] &&
+        new RegExp(`^${paymentId}:payments\\.refund:${paymentId}:refund:[0-9a-f-]{36}$`).test(
+          refundKeys[1] ?? "",
+        ),
+      refundKeys,
+    );
+  }
+  const fetched = await admin("GET", `/admin/payments/${paymentId}`);
+  check(
+    "GET /admin/payments/{id} answers the payment with its order",
+    fetched.status === 200 &&
+      at(fetched.body, "order") === orderId &&
+      at(fetched.body, "refunded", "amount") === 500,
+    fetched.body,
+  );
+
   // ---------- a cancelled order: Hypha's webhook makes the app cancel the intent ----------
   const cart2 = await sf("POST", "/storefront/carts", { country: "HR" });
   const C2 = `/storefront/carts/${text(at(cart2.body, "id"))}`;
@@ -600,6 +653,27 @@ try {
   const placed2 = await sf("POST", `${C2}/checkout`, {});
   const order4 = await admin("GET", `/admin/orders/${text(at(placed2.body, "id"))}`);
   const intent2 = String(at(order4.body, "payments", 0, "reference"));
+  const payment2 = text(at(order4.body, "payments", 0, "id"));
+  if (!REAL_STRIPE) {
+    // The buyer's card is declined: Stripe's intent waits for another card.
+    const declined = await deliver({
+      id: `evt_e2e_${randomBytes(6).toString("hex")}`,
+      object: "event",
+      type: "payment_intent.payment_failed",
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: { ...fake.intents.get(intent2), last_payment_error: { code: "card_declined" } },
+      },
+    });
+    const stillPending = await admin("GET", `/admin/payments/${payment2}`);
+    check(
+      "a declined card reports nothing: the payment stays pending for another card",
+      declined.status === 200 &&
+        at(declined.body, "status") === "ignored" &&
+        at(stillPending.body, "status") === "pending",
+      { hook: declined.body, payment: stillPending.body },
+    );
+  }
   const cancelled = await admin("POST", `/admin/orders/${text(at(placed2.body, "id"))}/cancel`, {
     reason: "customer",
   });

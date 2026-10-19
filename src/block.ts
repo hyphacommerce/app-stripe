@@ -9,7 +9,7 @@ import { type Installation, type Installations, NotConfiguredError } from "./ins
 import { APP_KEY } from "./manifest.ts";
 import { fromStripeAmount } from "./stripe/amounts.ts";
 import { dashboardUrl, type PaymentIntent, StripeError } from "./stripe/api.ts";
-import { fetchOrder, type OrderPayments } from "./stripe-webhooks.ts";
+import { fetchOrder, fetchPayment, type HyphaPayment } from "./hypha-api.ts";
 
 type Tone = "neutral" | "info" | "success" | "warning" | "error";
 
@@ -28,11 +28,8 @@ export async function handleBlock(
   installations: Installations,
   request: Request,
 ): Promise<Response> {
-  const installation = await installations.resolve(
-    (secret) => verifyForwardedRequest(secret, request, ""),
-    { store: request.headers.get(STORE_HEADER) },
-  );
-  if (!installation)
+  const installation = await installations.byStore(request.headers.get(STORE_HEADER));
+  if (!installation || !(await verifyForwardedRequest(installation.appSecret, request, "")))
     return Response.json(
       { code: "invalid_signature", error: "the signature doesn't verify" },
       { status: 401 },
@@ -64,14 +61,19 @@ export async function paymentBlock(
 ): Promise<BlockTree> {
   if (!orderId) return card([{ type: "text", value: "No order given.", variant: "supporting" }]);
 
-  let order: OrderPayments | undefined;
+  // The block's payment (`GET /admin/payments/{id}`), else the order's first Stripe one.
+  let payment: HyphaPayment | undefined;
   try {
-    order = await fetchOrder(installations, installation, orderId);
+    if (paymentId) {
+      const found = await fetchPayment(installations, installation, paymentId);
+      payment = found?.order === orderId && found.provider === APP_KEY ? found : undefined;
+    } else {
+      const order = await fetchOrder(installations, installation, orderId);
+      payment = order?.payments.find((p) => p.provider === APP_KEY);
+    }
   } catch (error) {
-    deps.log("warn", "block: reading the order failed", { error: String(error) });
+    deps.log("warn", "block: reading the payment failed", { error: String(error) });
   }
-  const payments = (order?.payments ?? []).filter((p) => p.provider === APP_KEY);
-  const payment = paymentId ? payments.find((p) => p.id === paymentId) : payments[0];
   if (!payment)
     return card([
       { type: "text", value: "This order has no Stripe payment.", variant: "supporting" },
@@ -108,7 +110,7 @@ export async function paymentBlock(
   const status = STATUS[intent.status] ?? { label: intent.status, tone: "neutral" };
   const money = (amount: number) =>
     formatMoney(fromStripeAmount(amount, intent.currency), intent.currency);
-  const refunded = payment.refunded?.amount ?? 0;
+  const refunded = payment.refunded.amount;
   const children: BlockElement[] = [
     {
       type: "row",

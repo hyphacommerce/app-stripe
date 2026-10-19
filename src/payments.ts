@@ -7,12 +7,10 @@ import {
   ExtensionError,
   type ExtensionContext,
   extensionHandler,
+  type PaymentActionRequest,
   type PaymentActionResponse,
-  type PointRequest,
-  type PointResponse,
-  SIGNATURE_HEADER,
-  STORE_HEADER,
-  verifySignature,
+  type PaymentsStartRequest,
+  type PaymentsStartResponse,
 } from "@hypha/app";
 
 import type { Deps } from "./config.ts";
@@ -21,7 +19,7 @@ import { ELEMENT_TAG } from "./manifest.ts";
 import { AmountError, toStripeAmount } from "./stripe/amounts.ts";
 import { type PaymentIntent, StripeError } from "./stripe/api.ts";
 
-/** Which installation each verified call is for (set before the SDK's handler runs). */
+/** Which installation each call is for: set when its secret is looked up by `Hypha-Store`. */
 const callers = new WeakMap<Request, Installation>();
 
 function installationOf(context: ExtensionContext): Installation {
@@ -59,7 +57,7 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
         },
       },
       reference: intent.id,
-    } satisfies PointResponse<"payments.start">;
+    } satisfies PaymentsStartResponse;
   });
 
   const capture = defineExtensionHandler("payments.capture", async (body, context) =>
@@ -110,7 +108,7 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
   /** Capture, void and refund: Stripe's "no" is `refused` (shown to staff), not a failure. */
   async function act(
     context: ExtensionContext,
-    body: PointRequest<"payments.capture">,
+    body: PaymentActionRequest,
     action: Action,
   ): Promise<PaymentActionResponse> {
     const installation = installationOf(context);
@@ -119,13 +117,13 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
     const reference = body.reference ?? known?.intentId;
     if (!reference?.startsWith("pi_"))
       return { status: "refused", reason: "This payment has no Stripe PaymentIntent." };
+    // Stripe keeps a key's first answer, refusals included, so a retry of this call
+    // (Hypha's key repeats) replays what Stripe did, success or not, and a staff
+    // member's next try is a new key from Hypha (`<payment>:<action>:<uuid>`), so it
+    // isn't answered with the last refusal. Stripe's keys are account-wide and a client
+    // may send its own: the payment (a UUIDv7) and the point make it ours.
+    const key = `${body.payment}:${context.point}:${context.idempotencyKey ?? crypto.randomUUID()}`;
     try {
-      // Stripe keeps a key's first answer, refusals included, and its keys are
-      // account-wide. So the key names the operation and the intent's state: a retry in
-      // the same state replays, while pressing again after the state moved (captured
-      // once authorized) is a new request rather than the old refusal.
-      const intent = await stripe.retrievePaymentIntent(reference);
-      const key = `${context.idempotencyKey ?? body.payment}:${context.point}:${intent.status}`;
       return { status: "accepted", reference: await action(stripe, reference, key) };
     } catch (error) {
       if (error instanceof AmountError) return { status: "refused", reason: error.message };
@@ -135,9 +133,13 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
     }
   }
 
-  const handler = extensionHandler({
-    // The secret is the verified caller's: `handle` below checked the signature first.
-    secret: (request) => callers.get(request)?.appSecret,
+  return extensionHandler({
+    // The secret of the store in `Hypha-Store`; the call's installation, for the handler.
+    secret: async ({ request, store }) => {
+      const installation = await installations.byStore(store);
+      if (installation) callers.set(request, installation);
+      return installation?.appSecret;
+    },
     handlers: [start, capture, voidPayment, refundPayment],
     onError: (error, context) =>
       deps.log("error", "extension handler failed", {
@@ -145,20 +147,6 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
         error: String(error),
       }),
   });
-
-  /** Finds the installation by `Hypha-Store` (or by the secret that verifies), then answers. */
-  return async (request: Request): Promise<Response> => {
-    if (request.method !== "POST") return handler(request);
-    const raw = new Uint8Array(await request.arrayBuffer());
-    const signature = request.headers.get(SIGNATURE_HEADER);
-    const installation = await installations.resolve(
-      (secret) => verifySignature(secret, signature, raw),
-      { store: request.headers.get(STORE_HEADER) },
-    );
-    const copy = new Request(request.url, { method: "POST", headers: request.headers, body: raw });
-    if (installation) callers.set(copy, installation);
-    return handler(copy);
-  };
 }
 
 /**
@@ -169,7 +157,7 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
 async function intentFor(
   deps: Deps,
   installation: Installation,
-  body: PointRequest<"payments.start">,
+  body: PaymentsStartRequest,
   captureMode: "automatic" | "manual",
   stripe: Awaited<ReturnType<Installations["stripe"]>>["stripe"],
 ): Promise<PaymentIntent> {

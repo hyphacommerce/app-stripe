@@ -110,13 +110,11 @@ export function sqlStorage(db: SqlDriver): Storage {
         ],
       );
     },
-    async setStore(id, storeId) {
-      // A store ID belongs to one installation: a reset deployment's old row lets go.
-      await db.run("UPDATE installations SET store_id = NULL WHERE store_id = ? AND id <> ?", [
-        storeId,
+    async setAdminOrigins(id, origins) {
+      await db.run("UPDATE installations SET admin_origins = ? WHERE id = ?", [
+        JSON.stringify(origins),
         id,
       ]);
-      await db.run("UPDATE installations SET store_id = ? WHERE id = ?", [storeId, id]);
     },
     async setTokens(id, tokens, scopes) {
       if (scopes === undefined)

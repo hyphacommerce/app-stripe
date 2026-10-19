@@ -1,75 +1,64 @@
-// Hypha's webhooks (`POST /hypha/webhooks`, design note 0016 §8): signed with the app
-// secret. `order.cancelled` cancels the order's open PaymentIntents at Stripe (Stripe's
+// Hypha's webhooks (`POST /hypha/webhooks`, design note 0016 §8), through the SDK's
+// `webhookHandler`: the secret is the one of the store in `Hypha-Store`, and each
+// delivery is handled once (`Hypha-Delivery-Id`, stable across retries).
+// `order.cancelled` cancels the order's open PaymentIntents at Stripe (Stripe's
 // `payment_intent.canceled` then reports them voided); `app.uninstalled` forgets the
-// tokens. Each event is handled once (`Hypha-Event-Id`).
+// tokens. A handler that throws answers 500, so Hypha retries.
 
-import { SIGNATURE_HEADER, verifySignature } from "@hypha/app";
+import { webhookHandler, type WebhookContext } from "@hypha/app";
 
 import type { Deps } from "./config.ts";
+import { fetchOrder } from "./hypha-api.ts";
 import { type Installation, type Installations, NotConfiguredError } from "./installations.ts";
 import { APP_KEY } from "./manifest.ts";
 import { StripeError } from "./stripe/api.ts";
-import { fetchOrder } from "./stripe-webhooks.ts";
-import { isRecord, parseJson, rec, str } from "./json.ts";
 
-export interface HyphaEnvelope {
-  id: string;
-  type: string;
-  subject: { type: string; id: string };
-}
-
-function toEnvelope(body: unknown): HyphaEnvelope | undefined {
-  if (!isRecord(body)) return undefined;
-  const subject = rec(body, "subject");
-  const [id, type] = [str(body, "id"), str(body, "type")];
-  if (!id || !type) return undefined;
-  return {
-    id,
-    type,
-    subject: {
-      type: (subject && str(subject, "type")) ?? "",
-      id: (subject && str(subject, "id")) ?? "",
-    },
-  };
-}
-
-export async function handleHyphaWebhook(
+export function hyphaWebhooks(
   deps: Deps,
   installations: Installations,
-  request: Request,
-): Promise<{ status: number; outcome: string }> {
-  const raw = new Uint8Array(await request.arrayBuffer());
-  const signature = request.headers.get(SIGNATURE_HEADER);
-  // Webhooks name no store: the installation is the one whose secret signed this.
-  const installation = await installations.resolve((secret) =>
-    verifySignature(secret, signature, raw),
-  );
-  if (!installation) return { status: 401, outcome: "invalid_signature" };
-
-  const envelope = toEnvelope(parseJson(new TextDecoder().decode(raw)));
-  if (!envelope) return { status: 400, outcome: "not an event" };
+): (request: Request) => Promise<Response> {
   const { storage } = deps;
-  if (await storage.eventSeen(installation.row.id, "hypha", envelope.id))
-    return { status: 200, outcome: "duplicate" };
-
-  switch (envelope.type) {
-    case "order.cancelled":
-      try {
-        await cancelOpenIntents(deps, installations, installation, envelope.subject.id);
-      } catch (error) {
-        deps.log("error", "voiding a cancelled order's intents failed", { error: String(error) });
-        return { status: 500, outcome: "try again" };
+  /** The delivery's installation, found when its secret was looked up. */
+  const callers = new WeakMap<Request, Installation>();
+  const installationOf = (context: WebhookContext): Installation => {
+    const installation = callers.get(context.request);
+    if (!installation) throw new Error("no installation for this delivery");
+    return installation;
+  };
+  return webhookHandler({
+    secret: async ({ request, store }) => {
+      const installation = await installations.byStore(store);
+      if (installation) callers.set(request, installation);
+      return installation?.appSecret;
+    },
+    dedupe: {
+      seen: (deliveryId, context) =>
+        storage.eventSeen(installationOf(context).row.id, "hypha", deliveryId),
+      remember: (deliveryId, context) =>
+        storage.markEvent(installationOf(context).row.id, "hypha", deliveryId, deps.now()),
+    },
+    onEvent: async (event, context) => {
+      const installation = installationOf(context);
+      switch (event.type) {
+        case "order.cancelled":
+          await cancelOpenIntents(deps, installations, installation, event.subject.id);
+          break;
+        case "app.uninstalled":
+          await storage.markUninstalled(installation.row.id, deps.now());
+          installations.forget(installation.row.id);
+          break;
+        default:
+          // `app.installed` and the rest: nothing to do.
+          break;
       }
-      break;
-    case "app.uninstalled":
-      await storage.markUninstalled(installation.row.id, deps.now());
-      installations.forget(installation.row.id);
-      break;
-    default:
-      break;
-  }
-  await storage.markEvent(installation.row.id, "hypha", envelope.id, deps.now());
-  return { status: 200, outcome: envelope.type };
+    },
+    onError: (error, event) =>
+      deps.log("error", "handling a Hypha webhook failed; Hypha will retry", {
+        event: event.id,
+        type: event.type,
+        error: String(error),
+      }),
+  });
 }
 
 /** Cancels every Stripe intent of the order that could still take money. */

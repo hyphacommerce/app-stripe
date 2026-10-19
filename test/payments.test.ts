@@ -47,9 +47,17 @@ test("payments.start makes a PaymentIntent and answers the element with its secr
   assert.equal(sent?.form.receipt_email, "ana@example.hr");
   assert.equal(sent?.form["metadata[hypha_payment]"], "pay_0001");
   assert.equal(sent?.form["metadata[hypha_store]"], STORE);
-  // The store was learned from this signed call.
-  const row = await h.deps.storage.installationByStore(STORE);
-  assert.ok(row);
+});
+
+test("a call for a store the app isn't installed in is a 401", async () => {
+  const h = await harness();
+  await h.install();
+  await configure(h);
+  const response = await h.extension("payments.start", START, {
+    store: "store_ffffffffffffffffffffffffffffffff",
+  });
+  assert.equal(response.status, 401);
+  assert.equal(h.stripe.requests.length, 0);
 });
 
 test("without the buyer's email (no customer_data:email) no receipt_email is sent", async () => {
@@ -160,6 +168,38 @@ test("capture, void and refund: accepted, or refused with Stripe's reason", asyn
   assert.equal(refund.status, "accepted");
   assert.match(refund.reference, /^re_/);
   assert.equal(h.stripe.requests.at(-1)?.form.amount, "300");
+});
+
+test("a retried action replays Stripe's answer; a new attempt is a new request", async () => {
+  const h = await harness();
+  await h.install();
+  await configure(h, { captureMode: "manual" });
+  const { reference } = (await (await h.extension("payments.start", START)).json()) as {
+    reference: string;
+  };
+  const action = { payment: "pay_0001", order: "ord_0001", reference };
+  const intent = h.stripe.intents.get(reference);
+  if (intent) intent.status = "requires_capture";
+
+  const key = `pay_0001:capture:${crypto.randomUUID()}`;
+  const first = await (
+    await h.extension("payments.capture", action, { idempotencyKey: key })
+  ).json();
+  assert.deepEqual(first, { status: "accepted", reference });
+  // Hypha retries the same call (a timeout): Stripe replays the capture, not "already captured".
+  const retried = await (
+    await h.extension("payments.capture", action, { idempotencyKey: key })
+  ).json();
+  assert.deepEqual(retried, first);
+  const captures = h.stripe.requests.filter((r) => r.path.endsWith("/capture"));
+  assert.equal(captures.length, 2);
+  assert.equal(captures[0]?.idempotencyKey, `pay_0001:payments.capture:${key}`);
+  assert.equal(captures[1]?.idempotencyKey, captures[0]?.idempotencyKey);
+  // A staff member's next press is a new attempt: Stripe answers it afresh.
+  const again = (await (await h.extension("payments.capture", action)).json()) as {
+    status: string;
+  };
+  assert.equal(again.status, "refused");
 });
 
 test("an action on a payment without an intent is refused", async () => {
