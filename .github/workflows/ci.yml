@@ -1,0 +1,86 @@
+# Install, typecheck, lint, format check, the generated bundles' check and the tests.
+#
+# The Hypha SDK packages (@hypha/app, …) are linked from a sibling Hypha checkout
+# (`link:../hypha/packages/…`) until they're published. The Hypha repository is private,
+# so CI checks it out with a token: add a repository secret `HYPHA_REPO_TOKEN` (a
+# fine-grained token with read access to invocation97/Hypha's contents) and, while the
+# SDK isn't on Hypha's main branch, a repository variable `HYPHA_REF` (e.g.
+# `feat/apps-platform`). Without the secret the job says so and checks nothing.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Is the Hypha checkout possible?
+        id: hypha
+        env:
+          HYPHA_REPO_TOKEN: ${{ secrets.HYPHA_REPO_TOKEN }}
+        run: |
+          if [ -n "$HYPHA_REPO_TOKEN" ]; then echo "available=true" >> "$GITHUB_OUTPUT"; else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HYPHA_REPO_TOKEN isn't set: skipping (the SDK packages live in the private Hypha repository)."
+          fi
+      - uses: actions/checkout@v4
+        if: steps.hypha.outputs.available == 'true'
+        with:
+          path: hypha-app-stripe
+      - uses: actions/checkout@v4
+        if: steps.hypha.outputs.available == 'true'
+        with:
+          repository: invocation97/Hypha
+          ref: ${{ vars.HYPHA_REF || 'main' }}
+          token: ${{ secrets.HYPHA_REPO_TOKEN }}
+          path: hypha
+      - uses: pnpm/action-setup@v4
+        if: steps.hypha.outputs.available == 'true'
+        with:
+          package_json_file: hypha-app-stripe/package.json
+      - uses: actions/setup-node@v4
+        if: steps.hypha.outputs.available == 'true'
+        with:
+          node-version: 24
+      - name: Install the Hypha SDK packages' own dependencies
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha
+        run: >-
+          pnpm install --frozen-lockfile
+          --filter @hypha/app --filter @hypha/sdk --filter @hypha/app-bridge
+          --filter @hypha/app-blocks --filter @hypha/storefront-elements
+      - name: Install
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha-app-stripe
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha-app-stripe
+        run: pnpm typecheck
+      - name: Lint
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha-app-stripe
+        run: pnpm lint
+      - name: Format
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha-app-stripe
+        run: pnpm fmt:check
+      - name: The committed bundles are current
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha-app-stripe
+        run: pnpm build:check
+      - name: Test
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha-app-stripe
+        run: pnpm test
+      - name: The Worker bundles
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha-app-stripe
+        run: pnpm exec wrangler deploy --dry-run --config wrangler.example.toml --outdir /tmp/worker
+      - name: The Node bundle builds
+        if: steps.hypha.outputs.available == 'true'
+        working-directory: hypha-app-stripe
+        run: pnpm build:node

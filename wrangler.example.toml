@@ -1,0 +1,23 @@
+# The Worker's configuration: copy to wrangler.toml (git-ignored) and fill in.
+#   cp wrangler.example.toml wrangler.toml
+#   wrangler d1 create hypha-app-stripe          # paste its database_id below
+#   wrangler secret put APP_ENCRYPTION_KEY       # openssl rand -hex 32; keep it forever
+#   wrangler deploy
+name = "hypha-app-stripe"
+main = "src/entry/worker.ts"
+compatibility_date = "2026-10-01"
+
+[vars]
+# The app's public URL (a custom domain or <name>.<account>.workers.dev): its manifest
+# is <APP_URL>/manifest.json, the OAuth client ID Hypha knows it by.
+APP_URL = "https://stripe.apps.example.com"
+# Comma-separated Hypha API origins allowed to install this instance; empty for any.
+HYPHA_API_ALLOWLIST = ""
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hypha-app-stripe"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[observability]
+enabled = true
