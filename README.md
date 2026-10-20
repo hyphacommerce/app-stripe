@@ -1,5 +1,13 @@
 # Stripe for Hypha
 
+> **For a Hypha deployment, use the Stripe spore instead.** Hypha now builds Stripe into
+> its API (design note 0030: `spores/stripe` in the Hypha repository, `hypha spores add
+> stripe` or `hypha init --spores stripe`): the same payments, webhooks, admin block and
+> `<stripe-payment>` element, with no service, database, OAuth installation or encryption
+> key of its own to run. This app stays as the worked example of an **external payment
+> app** (design note 0029): what a provider written in another language, or run as a
+> service for many stores, does to take payments through Hypha's extension points.
+
 Hypha's first-party Stripe app: card (and every other Payment Element method) payments
 for any [Hypha](https://github.com/invocation97/Hypha) store, built on Hypha's public
 app platform (design note 0029) like any third-party app. One TypeScript core on Web
