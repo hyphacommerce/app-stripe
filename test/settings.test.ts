@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { contextSigningInput, signRequest, signSessionToken } from "@hypha/app";
+import { contextSigningInput, signRequest, signSessionToken } from "@hyphacommerce/app";
 
 import {
   API_URL,

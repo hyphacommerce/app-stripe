@@ -13,7 +13,7 @@ import {
   STORE_HEADER,
   verifyForwardedRequest,
   verifySessionToken,
-} from "@hypha/app";
+} from "@hyphacommerce/app";
 
 import type { Deps } from "./config.ts";
 import { fromBase64Url } from "./crypto.ts";

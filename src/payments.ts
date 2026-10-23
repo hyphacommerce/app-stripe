@@ -11,7 +11,7 @@ import {
   type PaymentActionResponse,
   type PaymentsStartRequest,
   type PaymentsStartResponse,
-} from "@hypha/app";
+} from "@hyphacommerce/app";
 
 import type { Deps } from "./config.ts";
 import { type Installation, type Installations, NotConfiguredError } from "./installations.ts";

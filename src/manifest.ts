@@ -1,7 +1,7 @@
 // The app's manifest (design note 0029, §4), served at `/manifest.json`: that URL is the
 // app's OAuth client ID. Relative URLs resolve against `app_url`.
 
-import { type AppManifest, defineManifest, MANIFEST_SCHEMA_URL } from "@hypha/app";
+import { type AppManifest, defineManifest, MANIFEST_SCHEMA_URL } from "@hyphacommerce/app";
 
 export const APP_KEY = "app_stripe";
 export const APP_VERSION = "0.1.0";

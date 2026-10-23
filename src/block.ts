@@ -1,8 +1,8 @@
 // The `order.payment` block (design note 0029, §6.2): Hypha GETs it, signed, with the
 // order and payment as query parameters, and renders the tree with its own components.
 
-import type { BlockElement, BlockTree } from "@hypha/app-blocks";
-import { STORE_HEADER, verifyForwardedRequest } from "@hypha/app";
+import type { BlockElement, BlockTree } from "@hyphacommerce/app-blocks";
+import { STORE_HEADER, verifyForwardedRequest } from "@hyphacommerce/app";
 
 import type { Deps } from "./config.ts";
 import { type Installation, type Installations, NotConfiguredError } from "./installations.ts";

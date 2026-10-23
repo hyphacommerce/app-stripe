@@ -8,7 +8,7 @@ import {
   exchangeCode,
   OAuthError,
   parseAuthorizationResponse,
-} from "@hypha/app";
+} from "@hyphacommerce/app";
 
 import type { Deps } from "./config.ts";
 import { randomId } from "./crypto.ts";

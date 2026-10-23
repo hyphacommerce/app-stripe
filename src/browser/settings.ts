@@ -2,7 +2,7 @@
 // (docs/apps/bridge.md) authenticates each call to the app's own `/api/settings`.
 // Bundled by scripts/build-assets.ts into src/generated/assets.ts.
 
-import { type Bridge, createBridge } from "@hypha/app-bridge";
+import { type Bridge, createBridge } from "@hyphacommerce/app-bridge";
 
 interface View {
   store: string | null;

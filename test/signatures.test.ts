@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { signRequest, verifyForwardedRequest, verifySignature } from "@hypha/app";
+import { signRequest, verifyForwardedRequest, verifySignature } from "@hyphacommerce/app";
 
 import { signStripePayload, verifyStripeSignature } from "../src/stripe/signature.ts";
 
@@ -70,7 +70,7 @@ test("Hypha: the SDK verifies what Hypha signs, and nothing else", async () => {
 
 test("Hypha: a forwarded call's context is signed too", async () => {
   const at = 1_800_000_000;
-  const { contextSigningInput } = await import("@hypha/app");
+  const { contextSigningInput } = await import("@hyphacommerce/app");
   const headers = new Headers({ "hypha-store": "store_1", "hypha-staff": "user_1" });
   headers.set("hypha-signature", await signRequest("s", "", { timestamp: at }));
   headers.set(

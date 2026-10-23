@@ -1,9 +1,9 @@
 # Install, typecheck, lint, format check, the generated bundles' check and the tests.
 #
-# The Hypha SDK packages (@hypha/app, …) are linked from a sibling Hypha checkout
+# The Hypha SDK packages (@hyphacommerce/app, …) are linked from a sibling Hypha checkout
 # (`link:../hypha/packages/…`) until they're published. The Hypha repository is private,
 # so CI checks it out with a token: add a repository secret `HYPHA_REPO_TOKEN` (a
-# fine-grained token with read access to invocation97/Hypha's contents) and, while the
+# fine-grained token with read access to hyphacommerce/hypha's contents) and, while the
 # SDK isn't on Hypha's main branch, a repository variable `HYPHA_REF` (e.g.
 # `feat/apps-platform`). Without the secret the job says so and checks nothing.
 name: ci
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.hypha.outputs.available == 'true'
         with:
-          repository: invocation97/Hypha
+          repository: hyphacommerce/hypha
           ref: ${{ vars.HYPHA_REF || 'main' }}
           token: ${{ secrets.HYPHA_REPO_TOKEN }}
           path: hypha
@@ -50,8 +50,8 @@ jobs:
         working-directory: hypha
         run: >-
           pnpm install --frozen-lockfile
-          --filter @hypha/app --filter @hypha/sdk --filter @hypha/app-bridge
-          --filter @hypha/app-blocks --filter @hypha/storefront-elements
+          --filter @hyphacommerce/app --filter @hyphacommerce/sdk --filter @hyphacommerce/app-bridge
+          --filter @hyphacommerce/app-blocks --filter @hyphacommerce/storefront-elements
       - name: Install
         if: steps.hypha.outputs.available == 'true'
         working-directory: hypha-app-stripe

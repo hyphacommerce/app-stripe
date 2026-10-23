@@ -1,7 +1,7 @@
 # Stripe for Hypha
 
 Hypha's first-party Stripe app: card (and every other Payment Element method) payments
-for any [Hypha](https://github.com/invocation97/Hypha) store, built on Hypha's public
+for any [Hypha](https://github.com/hyphacommerce/hypha) store, built on Hypha's public
 app platform (design note 0029) like any third-party app. One TypeScript core on Web
 APIs (Hono router) runs on **Cloudflare Workers** (D1) and on **Node** (SQLite), and one
 instance can serve many Hypha stores.
@@ -40,11 +40,11 @@ What it does:
   `pending` (the storefront's "Complete payment" starts it again under the same ID,
   which answers the same intent).
 - **Hears Hypha's webhooks** (`order.cancelled`: it cancels the order's open intents;
-  `app.uninstalled`: it forgets the tokens) through `@hypha/app`'s `webhookHandler`,
+  `app.uninstalled`: it forgets the tokens) through `@hyphacommerce/app`'s `webhookHandler`,
   the secret picked by `Hypha-Store`, each delivery handled once (`Hypha-Delivery-Id`);
   a failure answers 500 so Hypha retries.
 - **Admin UI**: a settings page (`settings.app`, in the admin's iframe, using
-  `@hypha/app-bridge` for session tokens; the admin's `?origin=` is trusted only when
+  `@hyphacommerce/app-bridge` for session tokens; the admin's `?origin=` is trusted only when
   it's one of the store's admin origins, `GET /admin/app-extensions/origins`, read at
   install and again, at most every five minutes, for one not known yet), the same settings through Hypha's admin
   proxy (`/admin/apps/app_stripe/proxy/settings`), a block on `order.payment` (Stripe's
@@ -133,12 +133,12 @@ forgets them.
 
 ## Development
 
-The Hypha SDK packages (`@hypha/app`, `@hypha/app-bridge`, `@hypha/app-blocks`,
-`@hypha/storefront-elements`) are linked from a sibling Hypha checkout
+The Hypha SDK packages (`@hyphacommerce/app`, `@hyphacommerce/app-bridge`, `@hyphacommerce/app-blocks`,
+`@hyphacommerce/storefront-elements`) are linked from a sibling Hypha checkout
 (`link:../hypha/packages/…`), so clone Hypha next to this repository and run
 `pnpm install` there first. **They'll move to a registry**; the links become versions
 then. CI checks Hypha out beside this repository with the secret `HYPHA_REPO_TOKEN`
-(read access to invocation97/Hypha) and the variable `HYPHA_REF` (the branch carrying
+(read access to hyphacommerce/hypha) and the variable `HYPHA_REF` (the branch carrying
 the SDK, while it isn't on `main`); without the secret it skips.
 
 ```bash

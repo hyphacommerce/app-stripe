@@ -21,13 +21,13 @@
     "build:node": "node scripts/build-node.ts"
   },
   "dependencies": {
-    "@hypha/app": "link:../hypha/packages/app",
-    "@hypha/app-blocks": "link:../hypha/packages/app-blocks",
-    "@hypha/app-bridge": "link:../hypha/packages/app-bridge",
+    "@hyphacommerce/app": "link:../hypha/packages/app",
+    "@hyphacommerce/app-blocks": "link:../hypha/packages/app-blocks",
+    "@hyphacommerce/app-bridge": "link:../hypha/packages/app-bridge",
     "hono": "4.13.12"
   },
   "devDependencies": {
-    "@hypha/storefront-elements": "link:../hypha/packages/storefront-elements",
+    "@hyphacommerce/storefront-elements": "link:../hypha/packages/storefront-elements",
     "@types/node": "26.6.5",
     "esbuild": "0.28.2",
     "happy-dom": "20.14.6",

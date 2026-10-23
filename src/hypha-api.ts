@@ -1,7 +1,7 @@
 // What the app reads from Hypha's admin API, as the app (its OAuth token), typed from
-// `@hypha/sdk`'s OpenAPI types through `HyphaClient.admin`.
+// `@hyphacommerce/sdk`'s OpenAPI types through `HyphaClient.admin`.
 
-import type { HyphaClient } from "@hypha/app";
+import type { HyphaClient } from "@hyphacommerce/app";
 
 import type { Installation, Installations } from "./installations.ts";
 

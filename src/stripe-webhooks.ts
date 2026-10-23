@@ -5,7 +5,7 @@
 // Stripe refund, its `re_…` as the reference (Hypha counts each refund once by it) and as
 // the key, so two `charge.refunded` events, however they race, can't count one twice.
 
-import { NotInstalledError } from "@hypha/app";
+import { NotInstalledError } from "@hyphacommerce/app";
 
 import type { Deps } from "./config.ts";
 import type { Installation, Installations } from "./installations.ts";

@@ -12,7 +12,7 @@ import {
   OAuthError,
   type TokenSet,
   type TokenStore,
-} from "@hypha/app";
+} from "@hyphacommerce/app";
 
 import type { Deps } from "./config.ts";
 import { isRecord, num, parseJson, str } from "./json.ts";

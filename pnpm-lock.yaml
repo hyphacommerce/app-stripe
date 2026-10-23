@@ -166,20 +166,20 @@ importers:
 
   .:
     dependencies:
-      '@hypha/app':
+      '@hyphacommerce/app':
         specifier: link:../hypha/packages/app
         version: link:../hypha/packages/app
-      '@hypha/app-blocks':
+      '@hyphacommerce/app-blocks':
         specifier: link:../hypha/packages/app-blocks
         version: link:../hypha/packages/app-blocks
-      '@hypha/app-bridge':
+      '@hyphacommerce/app-bridge':
         specifier: link:../hypha/packages/app-bridge
         version: link:../hypha/packages/app-bridge
       hono:
         specifier: 4.13.12
         version: 4.13.12
     devDependencies:
-      '@hypha/storefront-elements':
+      '@hyphacommerce/storefront-elements':
         specifier: link:../hypha/packages/storefront-elements
         version: link:../hypha/packages/storefront-elements
       '@types/node':

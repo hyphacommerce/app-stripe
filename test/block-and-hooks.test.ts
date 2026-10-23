@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { contextSigningInput, signRequest } from "@hypha/app";
-import { validateBlock } from "@hypha/app-blocks";
+import { contextSigningInput, signRequest } from "@hyphacommerce/app";
+import { validateBlock } from "@hyphacommerce/app-blocks";
 
 import { APP_SECRET, configure, harness, type Harness, STORE } from "./helpers.ts";
 

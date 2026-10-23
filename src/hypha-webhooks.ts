@@ -5,7 +5,7 @@
 // `payment_intent.canceled` then reports them voided); `app.uninstalled` forgets the
 // tokens. A handler that throws answers 500, so Hypha retries.
 
-import { webhookHandler, type WebhookContext } from "@hypha/app";
+import { webhookHandler, type WebhookContext } from "@hyphacommerce/app";
 
 import type { Deps } from "./config.ts";
 import { fetchOrder } from "./hypha-api.ts";

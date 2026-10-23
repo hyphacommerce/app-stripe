@@ -1,7 +1,7 @@
 // A harness for the tests: the app over in-memory SQLite, with `fetch` routed to a fake
 // Hypha API and the fake Stripe, and a way to install it into the fake Hypha.
 
-import { signRequest } from "@hypha/app";
+import { signRequest } from "@hyphacommerce/app";
 
 import { createApp } from "../src/app.ts";
 import { createDeps, type Deps } from "../src/config.ts";
