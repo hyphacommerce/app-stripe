@@ -65,6 +65,24 @@ export interface PaymentIntent {
   metadata: Record<string, string>;
   livemode?: boolean;
   created?: number;
+  /** The last decline, kept on the intent after it. */
+  last_payment_error?: { code?: string; message?: string } | null;
+  /** Why a canceled intent was: `requested_by_customer`, `abandoned`, `automatic`, … */
+  cancellation_reason?: string | null;
+}
+
+/**
+ * What a canceled intent means to Hypha, one rule for `payments.status` and the webhook:
+ * `failed` when it ended on a decline (a last error, and nobody asked for the cancel),
+ * else cancelled (`voided` in Hypha's events).
+ */
+export function canceledOutcome(intent: {
+  last_payment_error?: unknown;
+  cancellation_reason?: unknown;
+}): "failed" | "canceled" {
+  const reason = intent.cancellation_reason;
+  const asked = typeof reason === "string" && reason !== "" && reason !== "automatic";
+  return intent.last_payment_error && !asked ? "failed" : "canceled";
 }
 
 export interface Charge {

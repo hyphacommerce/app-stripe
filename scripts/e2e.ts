@@ -1,6 +1,7 @@
-// End to end against a real local Hypha: installs the app over OAuth, sets it up, places
-// an order paid by card through the storefront API, and checks that Stripe's webhook,
-// reported by the app, marks the order paid (then a staff refund, partly).
+// End to end against a real local Hypha: installs the app over OAuth, sets it up, starts
+// a cart's card payment through the storefront API, and checks that the order is placed
+// once Stripe holds the money (asked through payments.status, and reported by the app
+// from Stripe's webhook), then a staff refund (partly) and a void.
 //
 //   docker compose up -d            # in the Hypha repository: its Postgres
 //   pnpm e2e
@@ -426,26 +427,36 @@ try {
     offered.body,
   );
   await sf("PUT", `${C}/payment-method`, { payment_method: at(method.body, "id") });
-  const placed = await sf("POST", `${C}/checkout`, { return_url: "https://shop.example/back" });
-  const next = at(placed.body, "next_action");
-  const props = at(next, "props");
-  check("checkout places the order", placed.status === 201, placed.body);
+  const early = await sf("POST", `${C}/checkout`, {});
   check(
-    "payments.start answered the stripe-payment element with a client secret",
+    "checkout before paying waits for the money (payment_required)",
+    early.status === 409 && at(early.body, "code") === "payment_required",
+    early.body,
+  );
+  const started = await sf("POST", `${C}/payment`, { return_url: "https://shop.example/back" });
+  const next = at(started.body, "next_action");
+  const props = at(next, "props");
+  check(
+    "the cart's payment starts before its order (status pending)",
+    started.status === 200 && at(started.body, "status") === "pending",
+    started.body,
+  );
+  check(
+    "payments.start v2 answered the stripe-payment element with a client secret",
     at(next, "type") === "client_widget" &&
       at(next, "element") === "stripe-payment" &&
       typeof at(props, "client_secret") === "string" &&
       at(props, "publishable_key") === stripeKeys.publishable,
-    placed.body,
+    started.body,
   );
-  const orderId = text(at(placed.body, "id"));
-  const order1 = await admin("GET", `/admin/orders/${orderId}`);
-  const payment = at(order1.body, "payments", 0);
+  const paymentId = text(at(started.body, "payment"));
+  const payment = (await admin("GET", `/admin/payments/${paymentId}`)).body;
   const intentId = text(at(payment, "reference"));
-  const paymentId = text(at(payment, "id"));
   check(
-    "the payment is pending with the intent as its reference",
-    at(payment, "status") === "pending" && intentId.startsWith("pi_"),
+    "the payment is pending with the intent as its reference and no order yet",
+    at(payment, "status") === "pending" &&
+      intentId.startsWith("pi_") &&
+      at(payment, "order") === null,
     payment,
   );
   check(
@@ -453,10 +464,17 @@ try {
     text(at(props, "client_secret")).startsWith(`${intentId}_secret_`),
     props,
   );
+  const resumed = await sf("POST", `${C}/payment`, {});
+  check(
+    "starting again resumes the same payment and intent",
+    at(resumed.body, "payment") === paymentId &&
+      at(resumed.body, "next_action", "props", "client_secret") === at(props, "client_secret"),
+    resumed.body,
+  );
   if (!REAL_STRIPE) {
     const created = fake.requests.find((r) => r.path === "/v1/payment_intents");
     check(
-      "Stripe got the order's amount, in minor units",
+      "Stripe got the cart's amount, in minor units",
       created?.form.amount === "2800" && created.form.currency === "eur",
       created?.form,
     );
@@ -471,8 +489,9 @@ try {
       created?.form,
     );
     check(
-      "and the payment in its metadata",
-      created?.form["metadata[hypha_payment]"] === paymentId,
+      "and the payment and cart in its metadata",
+      created?.form["metadata[hypha_payment]"] === paymentId &&
+        created?.form["metadata[hypha_cart]"] === text(at(cart.body, "id")),
       created?.form,
     );
   }
@@ -501,6 +520,22 @@ try {
     at(intent, "status"),
   );
 
+  // ---------- the shopper checks out before the webhook: Hypha asks payments.status ----------
+  const placed = await sf("POST", `${C}/checkout`, { return_url: "https://shop.example/back" });
+  check(
+    "checkout asks the app where the money is (payments.status) and places the order",
+    placed.status === 201 && at(placed.body, "financial_status") === "paid",
+    placed.body,
+  );
+  const orderId = text(at(placed.body, "id"));
+  const checkedOut = (await admin("GET", `/admin/orders/${orderId}`)).body;
+  check(
+    "the order carries the cart's payment, paid",
+    at(checkedOut, "payments", 0, "id") === paymentId &&
+      at(checkedOut, "payments", 0, "status") === "paid",
+    checkedOut,
+  );
+
   // ---------- Stripe's webhook reaches the app, which reports to Hypha ----------
   const deliver = async (event: Record<string, unknown>) => {
     const raw = JSON.stringify(event);
@@ -521,7 +556,7 @@ try {
   };
   const hook = await deliver(succeeded);
   check(
-    "the app takes Stripe's webhook and reports it",
+    "the app takes Stripe's webhook and reports it (a paid payment stays paid)",
     hook.status === 200 && at(hook.body, "status") === "reported",
     hook.body,
   );
@@ -545,8 +580,9 @@ try {
   check("a forged webhook is refused", badSig.status === 400, badSig.body);
   const calls = await admin("GET", "/admin/apps/app_stripe/extension-calls");
   check(
-    "Hypha logged the payments.start call",
-    calls.text.includes('"point":"payments.start"'),
+    "Hypha logged the payments.start and payments.status calls",
+    calls.text.includes('"point":"payments.start"') &&
+      calls.text.includes('"point":"payments.status"'),
     calls.body,
   );
 
@@ -670,10 +706,21 @@ try {
   );
   await sf("PUT", `${C2}/email`, { email: "ana@example.hr" });
   await sf("PUT", `${C2}/payment-method`, { payment_method: at(method.body, "id") });
-  const placed2 = await sf("POST", `${C2}/checkout`, {});
-  const order4 = await admin("GET", `/admin/orders/${text(at(placed2.body, "id"))}`);
-  const intent2 = String(at(order4.body, "payments", 0, "reference"));
-  const payment2 = text(at(order4.body, "payments", 0, "id"));
+  // Manual capture from here: the order is placed on an authorization, which staff
+  // release through payments.void before cancelling the order.
+  const manual = await http("PUT", `${APP}/api/settings`, {
+    headers: { authorization: `Bearer ${sessionToken}` },
+    body: { capture_mode: "manual" },
+  });
+  check("the capture mode is switched to manual", manual.status === 200, manual.body);
+  const started2 = await sf("POST", `${C2}/payment`, {});
+  const payment2 = text(at(started2.body, "payment"));
+  const intent2 = text(at((await admin("GET", `/admin/payments/${payment2}`)).body, "reference"));
+  check(
+    "a second cart's payment starts",
+    started2.status === 200 && intent2.startsWith("pi_"),
+    started2.body,
+  );
   if (!REAL_STRIPE) {
     // The buyer's card is declined: Stripe's intent waits for another card.
     const declined = await deliver({
@@ -693,26 +740,85 @@ try {
         at(stillPending.body, "status") === "pending",
       { hook: declined.body, payment: stillPending.body },
     );
+    const waiting = await sf("POST", `${C2}/checkout`, {});
+    check(
+      "checkout while the intent is open waits (payment_pending)",
+      waiting.status === 409 && at(waiting.body, "code") === "payment_pending",
+      waiting.body,
+    );
   }
+  if (REAL_STRIPE) {
+    await fetch(`https://api.stripe.com/v1/payment_intents/${intent2}/confirm`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${REAL_STRIPE.secret}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        payment_method: "pm_card_visa",
+        return_url: "https://shop.example/back",
+      }),
+    });
+  } else {
+    fake.succeed(intent2);
+  }
+  const placed2 = await sf("POST", `${C2}/checkout`, {});
+  check(
+    "an authorized intent places the order (financial_status authorized)",
+    placed2.status === 201 && at(placed2.body, "financial_status") === "authorized",
+    placed2.body,
+  );
+  // An order whose money is held can't be cancelled under it: staff void the payment
+  // first (payments.void cancels the intent at Stripe), then cancel the order.
+  const voided = await admin(
+    "POST",
+    `/admin/payments/${payment2}/void`,
+    {},
+    { "idempotency-key": `void-${payment2}` },
+  );
+  check("staff void the authorization: the app accepts (202)", voided.status === 202, voided.body);
+  let canceledAtStripe = false;
+  if (REAL_STRIPE) {
+    const read = await fetch(`https://api.stripe.com/v1/payment_intents/${intent2}`, {
+      headers: { authorization: `Bearer ${REAL_STRIPE.secret}` },
+    });
+    canceledAtStripe = at(await read.json(), "status") === "canceled";
+  } else canceledAtStripe = fake.intents.get(intent2)?.status === "canceled";
+  check(
+    "payments.void cancels the intent at Stripe",
+    canceledAtStripe,
+    fake.intents.get(intent2)?.status,
+  );
+  const canceledEvent = await deliver({
+    id: `evt_e2e_${randomBytes(6).toString("hex")}`,
+    object: "event",
+    type: "payment_intent.canceled",
+    created: Math.floor(Date.now() / 1000),
+    data: {
+      object: REAL_STRIPE
+        ? {
+            id: intent2,
+            object: "payment_intent",
+            status: "canceled",
+            metadata: { hypha_payment: payment2 },
+          }
+        : fake.intents.get(intent2),
+    },
+  });
+  const voidedPayment = await admin("GET", `/admin/payments/${payment2}`);
+  check(
+    "Stripe's payment_intent.canceled is reported: the payment is voided",
+    canceledEvent.status === 200 && at(voidedPayment.body, "status") === "voided",
+    { hook: canceledEvent.body, payment: voidedPayment.body },
+  );
   const cancelled = await admin("POST", `/admin/orders/${text(at(placed2.body, "id"))}/cancel`, {
     reason: "customer",
   });
   check(
-    "staff cancel a second, unpaid order",
-    cancelled.status === 200 && intent2.startsWith("pi_"),
+    "staff cancel the second order once its money is released",
+    cancelled.status === 200,
     cancelled.body,
   );
-  let canceledAtStripe = false;
-  for (let i = 0; i < 40 && !canceledAtStripe; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    canceledAtStripe = REAL_STRIPE ? false : fake.intents.get(intent2)?.status === "canceled";
-  }
-  if (!REAL_STRIPE)
-    check(
-      "order.cancelled reaches the app (signed webhook) and the intent is canceled",
-      canceledAtStripe,
-      fake.intents.get(intent2)?.status,
-    );
 
   // ---------- what a storefront loads ----------
   const discovery = await sf("GET", "/storefront/app-extensions?target=checkout.payment");

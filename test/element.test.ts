@@ -82,7 +82,8 @@ test("props set before the upgrade are kept and the Payment Element is mounted",
     appearance: { variables: Record<string, string> };
   };
   assert.equal(options.clientSecret, "pi_1_secret_x");
-  assert.equal(options.appearance.variables.colorPrimary, "#ff0000");
+  // Resolved on a probe: the test DOM computes the literal, a browser `rgb()`.
+  assert.match(options.appearance.variables.colorPrimary ?? "", /^(#ff0000|rgb\(255, 0, 0\))$/);
   // Stripe's container is in the light DOM, slotted into the shadow root.
   assert.equal(element.querySelector('[slot="stripe"]') !== null, true);
   assert.ok(element.shadowRoot?.querySelector("button"));
@@ -103,7 +104,7 @@ test("paying confirms with redirect if_required and emits hypha:payment-confirme
   assert.deepEqual(events, [{ type: "hypha:payment-confirmed", detail: { paymentId: "pay_1" } }]);
 });
 
-test("a declined card emits hypha:error with Stripe's message and stops further presses", async () => {
+test("a declined card emits hypha:error with Stripe's message and leaves the button for another try", async () => {
   const second = document.createElement("stripe-payment") as HTMLElement & Record<string, unknown>;
   document.body.append(second);
   second.publishableKey = "pk_test_1";
@@ -116,5 +117,29 @@ test("a declined card emits hypha:error with Stripe's message and stops further 
   button.click();
   await settle();
   assert.deepEqual(errors, [{ message: "Your card was declined." }]);
-  assert.equal(button.disabled, true);
+  // The intent still takes a card (Stripe says `requires_payment_method`).
+  assert.equal(button.disabled, false);
+});
+
+test("submit_mode external hides the button, emits hypha:ready and pays through submit()", async () => {
+  const third = document.createElement("stripe-payment") as HTMLElement & Record<string, unknown>;
+  const ready: string[] = [];
+  third.addEventListener("hypha:ready", () => ready.push("ready"));
+  document.body.append(third);
+  third.submit_mode = "external";
+  third.publishableKey = "pk_test_1";
+  third.clientSecret = "pi_3_secret_z";
+  third.payment_id = "pay_3";
+  await settle();
+  assert.deepEqual(ready, ["ready"]);
+  const button = third.shadowRoot?.querySelector("button") as HTMLButtonElement;
+  assert.equal(button.hidden, true);
+  confirmResult = { paymentIntent: { id: "pi_3", status: "succeeded" } };
+  const confirmed: unknown[] = [];
+  third.addEventListener("hypha:payment-confirmed", (event) =>
+    confirmed.push((event as CustomEvent).detail),
+  );
+  (third as unknown as { submit(): void }).submit();
+  await settle();
+  assert.deepEqual(confirmed, [{ paymentId: "pay_3" }]);
 });

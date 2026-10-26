@@ -59,7 +59,9 @@ export interface OAuthStateRow {
 export interface PaymentRow {
   installationId: string;
   paymentId: string;
-  orderId: string;
+  /** The cart it was started for (a payment starts before its order exists); `null` for
+   * a row written before payments started with a cart. */
+  cartId: string | null;
   intentId: string;
   createdAt: number;
 }

@@ -9,8 +9,7 @@ async function started(h: Harness) {
   await configure(h);
   const response = await h.extension("payments.start", {
     payment: "pay_0001",
-    order: "ord_0001",
-    order_number: 1001,
+    cart: "cart_0001",
     method: "pm_1",
     amount: { amount: 1390, currency: "EUR" },
     channel: "chan_1",
@@ -75,6 +74,19 @@ test("authorized, failed and canceled map to Hypha's moves", async () => {
   assert.deepEqual(
     h.hypha.events.map((e) => e.body.type),
     ["authorized", "voided"],
+  );
+});
+
+test("payment_intent.canceled after a final decline reports failed, as payments.status would", async () => {
+  const h = await harness();
+  const reference = await started(h);
+  const intent = h.stripe.intents.get(reference);
+  if (intent)
+    Object.assign(intent, { status: "canceled", last_payment_error: { code: "card_declined" } });
+  await deliver(h, intentEvent(h, "evt_c2", "payment_intent.canceled", reference));
+  assert.deepEqual(
+    h.hypha.events.map((e) => e.body.type),
+    ["failed"],
   );
 });
 

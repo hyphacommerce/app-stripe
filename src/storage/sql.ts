@@ -53,13 +53,61 @@ export const SCHEMA: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS payments (
     installation_id TEXT NOT NULL,
     payment_id TEXT NOT NULL,
-    order_id TEXT NOT NULL,
+    cart_id TEXT,
+    order_id TEXT,
     intent_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (installation_id, payment_id)
   )`,
   `CREATE INDEX IF NOT EXISTS payments_by_intent ON payments (installation_id, intent_id)`,
 ];
+
+/**
+ * A `payments` table made before payments started with a cart (`payments.start` v1) has
+ * no `cart_id` and requires an order; SQLite can't drop a NOT NULL, so it's rebuilt:
+ * copied into `payments_v2`, dropped, renamed. D1 runs each statement on its own, so
+ * every step can be run again after a crash: the copy is `IF NOT EXISTS` and `OR IGNORE`,
+ * and a `payments_v2` left without a `payments` is renamed. Runs before the schema, so
+ * the schema's `CREATE TABLE IF NOT EXISTS` can't make an empty table beside it.
+ */
+async function rebuildPayments(db: SqlDriver): Promise<void> {
+  const tables = new Set(
+    (
+      await db.all(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('payments', 'payments_v2')",
+        [],
+      )
+    ).map((row) => String(row.name)),
+  );
+  if (tables.has("payments")) {
+    const columns = await db.all("PRAGMA table_info(payments)", []);
+    const old =
+      !columns.some((c) => c.name === "cart_id") ||
+      columns.some((c) => c.name === "order_id" && Number(c.notnull) === 1);
+    if (!old) return;
+    await db.run(
+      `CREATE TABLE IF NOT EXISTS payments_v2 (
+        installation_id TEXT NOT NULL,
+        payment_id TEXT NOT NULL,
+        cart_id TEXT,
+        order_id TEXT,
+        intent_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (installation_id, payment_id)
+      )`,
+      [],
+    );
+    await db.run(
+      `INSERT OR IGNORE INTO payments_v2 (installation_id, payment_id, cart_id, order_id,
+        intent_id, created_at) SELECT installation_id, payment_id, NULL, order_id, intent_id,
+        created_at FROM payments`,
+      [],
+    );
+    await db.run("DROP TABLE payments", []);
+    tables.add("payments_v2");
+  }
+  if (tables.has("payments_v2")) await db.run("ALTER TABLE payments_v2 RENAME TO payments", []);
+}
 
 function installation(row: Record<string, unknown> | undefined): InstallationRow | undefined {
   return row === undefined ? undefined : toInstallation(row);
@@ -68,6 +116,7 @@ function installation(row: Record<string, unknown> | undefined): InstallationRow
 export function sqlStorage(db: SqlDriver): Storage {
   return {
     async migrate() {
+      await rebuildPayments(db);
       for (const statement of SCHEMA) await db.run(statement, []);
     },
     async getInstallation(id) {
@@ -185,9 +234,9 @@ export function sqlStorage(db: SqlDriver): Storage {
     },
     async putPayment(row) {
       await db.run(
-        `INSERT OR REPLACE INTO payments (installation_id, payment_id, order_id, intent_id,
+        `INSERT OR REPLACE INTO payments (installation_id, payment_id, cart_id, intent_id,
           created_at) VALUES (?, ?, ?, ?, ?)`,
-        [row.installationId, row.paymentId, row.orderId, row.intentId, row.createdAt],
+        [row.installationId, row.paymentId, row.cartId, row.intentId, row.createdAt],
       );
     },
     async paymentById(installationId, paymentId) {
@@ -242,7 +291,7 @@ function toPayment(row: Record<string, unknown>): PaymentRow {
   return {
     installationId: text(row.installation_id),
     paymentId: text(row.payment_id),
-    orderId: text(row.order_id),
+    cartId: nullableString(row.cart_id),
     intentId: text(row.intent_id),
     createdAt: Number(row.created_at),
   };

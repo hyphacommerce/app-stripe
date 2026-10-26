@@ -92,7 +92,7 @@ export function createApp(deps: Deps): Hono {
   });
 
   // ---------- Hypha calls the app ----------
-  for (const path of [PATHS.start, PATHS.capture, PATHS.void, PATHS.refund])
+  for (const path of [PATHS.start, PATHS.status, PATHS.capture, PATHS.void, PATHS.refund])
     app.all(path, (c) => payments(c.req.raw));
   app.post(PATHS.hyphaWebhooks, (c) => webhooks(c.req.raw));
   app.get(PATHS.paymentBlock, (c) => handleBlock(deps, installations, c.req.raw));

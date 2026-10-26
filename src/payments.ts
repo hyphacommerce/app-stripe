@@ -11,13 +11,14 @@ import {
   type PaymentActionResponse,
   type PaymentsStartRequest,
   type PaymentsStartResponse,
+  type PaymentsStatusResponse,
 } from "@hyphacommerce/app";
 
 import type { Deps } from "./config.ts";
 import { type Installation, type Installations, NotConfiguredError } from "./installations.ts";
 import { ELEMENT_TAG } from "./manifest.ts";
 import { AmountError, toStripeAmount } from "./stripe/amounts.ts";
-import { type PaymentIntent, StripeError } from "./stripe/api.ts";
+import { canceledOutcome, type PaymentIntent, StripeError } from "./stripe/api.ts";
 import { reportToHypha } from "./stripe-webhooks.ts";
 
 /** Which installation each call is for: set when its secret is looked up by `Hypha-Store`. */
@@ -40,25 +41,60 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
     }
   };
 
-  const start = defineExtensionHandler("payments.start", async (body, context) => {
-    const installation = installationOf(context);
-    const { stripe, settings } = await configured(installation);
-    if (!settings.publishableKey)
-      throw new ExtensionError("not_configured", "Stripe's publishable key isn't set", 409);
-    const intent = await intentFor(deps, installation, body, settings.captureMode, stripe);
-    return {
-      next_action: {
-        type: "client_widget",
-        element: ELEMENT_TAG,
-        props: {
-          client_secret: intent.client_secret,
-          publishable_key: settings.publishableKey,
-          return_url: body.return_url ?? null,
-          payment_id: body.payment,
+  // Version 2: a cart's payment, started before its order exists. Hypha places the
+  // order once the app reports the money committed (or `payments.status` says so).
+  const start = defineExtensionHandler(
+    "payments.start",
+    async (body, context) => {
+      const installation = installationOf(context);
+      const { stripe, settings } = await configured(installation);
+      if (!settings.publishableKey)
+        throw new ExtensionError("not_configured", "Stripe's publishable key isn't set", 409);
+      const intent = await intentFor(deps, installation, body, settings.captureMode, stripe);
+      return {
+        next_action: {
+          type: "client_widget",
+          element: ELEMENT_TAG,
+          props: {
+            client_secret: intent.client_secret,
+            publishable_key: settings.publishableKey,
+            return_url: body.return_url ?? null,
+            payment_id: body.payment,
+          },
         },
-      },
+        reference: intent.id,
+      } satisfies PaymentsStartResponse;
+    },
+    { versions: [2] },
+  );
+
+  // Checkout asks where the money is when the shopper's browser says they paid before
+  // Stripe's webhook arrived: the intent's state, read from Stripe. Hypha sends the
+  // reference the start answered; storage is read only when it sends none.
+  const status = defineExtensionHandler("payments.status", async (body, context) => {
+    const installation = installationOf(context);
+    const { stripe } = await configured(installation);
+    const reference =
+      body.attempt ??
+      body.reference ??
+      (await deps.storage.paymentById(installation.row.id, body.payment))?.intentId;
+    if (!reference?.startsWith("pi_")) return { state: "open" } satisfies PaymentsStatusResponse;
+    let intent: PaymentIntent;
+    try {
+      intent = await stripe.retrievePaymentIntent(reference);
+    } catch (error) {
+      // An intent the account doesn't know (the keys were swapped while a cart held a
+      // pending payment): say so, so Hypha voids it and the shopper starts anew, rather
+      // than fail, which would leave the cart's checkout waiting for good.
+      if (error instanceof StripeError && error.code === "resource_missing")
+        return { state: "canceled", reference } satisfies PaymentsStatusResponse;
+      throw error;
+    }
+    return {
+      state: intentState(intent),
       reference: intent.id,
-    } satisfies PaymentsStartResponse;
+      attempt: intent.id,
+    } satisfies PaymentsStatusResponse;
   });
 
   const capture = defineExtensionHandler("payments.capture", async (body, context) => {
@@ -167,7 +203,7 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
       if (installation) callers.set(request, installation);
       return installation?.appSecret;
     },
-    handlers: [start, capture, voidPayment, refundPayment],
+    handlers: [start, status, capture, voidPayment, refundPayment],
     onError: (error, context) =>
       deps.log("error", "extension handler failed", {
         point: context.point,
@@ -212,12 +248,13 @@ async function intentFor(
         currency: body.amount.currency.toLowerCase(),
         capture_method: captureMode === "manual" ? "manual" : "automatic",
         automatic_payment_methods: { enabled: true },
-        description: `Order ${body.order_number}`,
+        description: body.order_number == null ? `Cart ${body.cart}` : `Order ${body.order_number}`,
         receipt_email: body.customer_email ?? undefined,
         metadata: {
           hypha_payment: body.payment,
-          hypha_order: body.order,
-          hypha_order_number: body.order_number,
+          hypha_cart: body.cart,
+          hypha_order: body.order ?? undefined,
+          hypha_order_number: body.order_number == null ? undefined : String(body.order_number),
           hypha_store: installation.row.storeId ?? undefined,
           hypha_installation: installation.row.id,
         },
@@ -227,7 +264,7 @@ async function intentFor(
     await deps.storage.putPayment({
       installationId: installation.row.id,
       paymentId: body.payment,
-      orderId: body.order,
+      cartId: body.cart,
       intentId: intent.id,
       createdAt: deps.now(),
     });
@@ -236,5 +273,25 @@ async function intentFor(
     if (error instanceof StripeError && error.isRefusal)
       throw new ExtensionError("stripe_refused", error.message, 422);
     throw error;
+  }
+}
+
+/**
+ * A PaymentIntent as a payment's state: `requires_capture` holds the money, `processing`
+ * is collecting it, `succeeded` has it; the `requires_…` steps before wait for the
+ * shopper; a canceled one failed or was cancelled by the webhook's rule.
+ */
+function intentState(intent: PaymentIntent): PaymentsStatusResponse["state"] {
+  switch (intent.status) {
+    case "requires_capture":
+      return "authorized";
+    case "processing":
+      return "processing";
+    case "succeeded":
+      return "paid";
+    case "canceled":
+      return canceledOutcome(intent);
+    default:
+      return "open";
   }
 }
