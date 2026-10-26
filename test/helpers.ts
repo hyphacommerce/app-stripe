@@ -33,7 +33,6 @@ export interface FakeHypha {
   /** The store's admin origins (`GET /admin/app-extensions/origins`). */
   adminOrigins: string[];
   /** Answers reads of orders with a 503. */
-  failOrders: boolean;
 }
 
 export interface Harness {
@@ -66,7 +65,6 @@ export async function harness(): Promise<Harness> {
     issuedTokens: 0,
     legacyTokens: false,
     adminOrigins: ["https://admin.shop.test"],
-    failOrders: false,
   };
   const fakeHypha = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
@@ -110,8 +108,6 @@ export async function harness(): Promise<Harness> {
       return Response.json({ code: "payment_not_found", error: "no" }, { status: 404 });
     }
     const order = /^\/admin\/orders\/([^/]+)$/.exec(url.pathname);
-    if (order?.[1] && hypha.failOrders)
-      return Response.json({ code: "unavailable", error: "try later" }, { status: 503 });
     if (order?.[1]) {
       const found = hypha.orders.get(order[1]);
       return found
