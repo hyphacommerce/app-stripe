@@ -1,13 +1,17 @@
-// `<stripe-payment>`: the storefront element for `checkout.payment` (design note 0029,
-// §7; docs/apps/elements.md). Props (set as properties): `client_secret`,
-// `publishable_key`, `return_url`, `payment_id`, as `payments.start` answered them
-// (camelCase aliases work too). It loads Stripe.js from js.stripe.com (the only way
-// Stripe allows), mounts the Payment Element, confirms with `redirect: "if_required"`,
-// and emits `hypha:payment-confirmed {paymentId}`, `hypha:error {message}` and
-// `hypha:resize {height}`. Themed by `--hypha-*` custom properties.
+// `<stripe-payment>`: the storefront element for `checkout.payment` (docs/apps/elements.md).
+// Props (set as properties): `client_secret`, `publishable_key`, `return_url`, `payment_id`,
+// as `payments.start` answered them (camelCase aliases work too), and the storefront's
+// `submit_mode`: `"external"` hides the element's own button and error line, and the
+// storefront pays with its own by calling `submit()` (the checkout's one "Pay" button). It
+// loads Stripe.js from js.stripe.com (the only way Stripe allows), mounts the Payment
+// Element, confirms with `redirect: "if_required"`, and emits `hypha:ready` (it can be
+// submitted), `hypha:payment-confirmed {paymentId}`, `hypha:error {message}` and
+// `hypha:resize {height}`. Themed by `--hypha-*` custom properties (resolved to plain
+// colours for Stripe's Appearance API, its dark theme on a dark background).
 //
-// Bundled by scripts/build-assets.ts into src/generated/assets.ts, served at
-// /elements/payment.js.
+// The same source as the Stripe spore's element (hyphacommerce/spore-stripe,
+// `element/payment-element.ts`): keep them in step. Bundled by scripts/build-assets.ts
+// into src/generated/assets.ts, served at /elements/payment.js.
 
 const STRIPE_JS = "https://js.stripe.com/v3";
 const TAG = "stripe-payment";
@@ -17,6 +21,7 @@ interface StripeElement {
   mount(target: HTMLElement): void;
   destroy(): void;
   on(event: "ready" | "change", handler: (event: { complete?: boolean }) => void): void;
+  on(event: "loaderror", handler: (event: { error?: { message?: string } }) => void): void;
 }
 interface StripeElements {
   create(type: "payment", options?: Record<string, unknown>): StripeElement;
@@ -33,6 +38,15 @@ interface StripeInstance {
 }
 type StripeFactory = (publishableKey: string) => StripeInstance;
 
+/** An sRGB byte as linear light, for relative luminance. */
+function linear(c: number): number {
+  const v = c / 255;
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+
+/** An intent's states in which it still takes a payment attempt. */
+const OPEN = new Set(["requires_payment_method", "requires_confirmation", "requires_action"]);
+
 declare global {
   interface Window {
     Stripe?: StripeFactory;
@@ -40,12 +54,6 @@ declare global {
 }
 
 let loading: Promise<StripeFactory> | undefined;
-
-/** An sRGB byte as its linear value, for relative luminance. */
-function linear(c: number): number {
-  const v = c / 255;
-  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-}
 
 /** Loads Stripe.js once per page, from js.stripe.com. */
 export function loadStripe(doc: Document = document): Promise<StripeFactory> {
@@ -80,13 +88,20 @@ export function loadStripe(doc: Document = document): Promise<StripeFactory> {
   return loading;
 }
 
-const PROPS = ["client_secret", "publishable_key", "return_url", "payment_id"] as const;
+const PROPS = [
+  "client_secret",
+  "publishable_key",
+  "return_url",
+  "payment_id",
+  "submit_mode",
+] as const;
 type Prop = (typeof PROPS)[number];
 const ALIASES: Record<string, Prop> = {
   clientSecret: "client_secret",
   publishableKey: "publishable_key",
   returnUrl: "return_url",
   paymentId: "payment_id",
+  submitMode: "submit_mode",
 };
 
 const STYLE = `
@@ -110,6 +125,7 @@ export class StripePayment extends HTMLElement {
     publishable_key: null,
     return_url: null,
     payment_id: null,
+    submit_mode: null,
   };
   #root: ShadowRoot;
   #mountPoint: HTMLDivElement | undefined;
@@ -160,6 +176,9 @@ export class StripePayment extends HTMLElement {
       get: () => this.#props[prop],
       set: (value: unknown) => {
         this.#props[prop] = typeof value === "string" && value ? value : null;
+        // A storefront paying with its own button shows the errors too (`hypha:error`).
+        this.#button.hidden = this.#external();
+        this.#error.hidden = this.#external();
         if (this.isConnected) void this.#mount();
       },
     });
@@ -184,6 +203,19 @@ export class StripePayment extends HTMLElement {
     this.#mountedFor = null;
   }
 
+  /** Whether the storefront pays with its own button (`submit()`). */
+  #external(): boolean {
+    return this.#props.submit_mode === "external";
+  }
+
+  /**
+   * Pays: what the element's own button does, for a storefront with its own (`submit_mode:
+   * "external"`). The outcome arrives as `hypha:payment-confirmed` or `hypha:error`.
+   */
+  submit(): void {
+    void this.#pay();
+  }
+
   #emit(type: string, detail: Record<string, unknown>) {
     this.dispatchEvent(new CustomEvent(type, { detail, bubbles: true, composed: true }));
   }
@@ -196,9 +228,8 @@ export class StripePayment extends HTMLElement {
   /**
    * `--hypha-*` from the page, as Stripe's Appearance API: its fields live in Stripe's
    * iframes, which see none of the page's CSS. Colours are resolved here (a storefront's
-   * may be `light-dark()` pairs or `oklch()`, which Stripe doesn't read: it takes only
-   * hex, `rgb()` and `hsl()`), and a dark background (or `--hypha-color-scheme: dark`)
-   * picks Stripe's dark theme.
+   * may be `light-dark()` pairs or `oklch()`, which Stripe doesn't read), and a dark
+   * background (or `--hypha-color-scheme: dark`) picks Stripe's dark theme.
    */
   #appearance(): Record<string, unknown> {
     const css = getComputedStyle(this);
@@ -212,7 +243,9 @@ export class StripePayment extends HTMLElement {
       ["--hypha-color-error", "colorDanger"],
     ];
     for (const [property, variable] of colours) {
-      const value = read(property) && this.#rgb(`var(${property})`);
+      const raw = read(property);
+      // A browser resolves the probe; a test DOM doesn't, and the raw value stands in.
+      const value = raw && (this.#rgb(`var(${property})`) ?? { css: raw, luminance: 1 });
       if (value) variables[variable] = value.css;
     }
     const font = read("--hypha-font-family");
@@ -241,8 +274,7 @@ export class StripePayment extends HTMLElement {
    * A CSS colour as `rgb()` with its relative luminance, or nothing when it isn't one.
    * Resolved on a probe in this element's shadow root (so `light-dark()` follows the
    * page's colour scheme and `var()` its custom properties), then through a canvas,
-   * which turns any colour space into sRGB bytes. Without a canvas (a test DOM) the
-   * computed value is passed on as is.
+   * which turns any colour space into sRGB bytes.
    */
   #rgb(colour: string): { css: string; luminance: number } | undefined {
     const probe = document.createElement("span");
@@ -251,10 +283,10 @@ export class StripePayment extends HTMLElement {
     const computed = getComputedStyle(probe).color;
     probe.remove();
     if (!computed) return undefined;
-    const context = document.createElement("canvas").getContext?.("2d", {
+    const context = document.createElement("canvas").getContext("2d", {
       willReadFrequently: true,
     });
-    if (!context) return { css: computed, luminance: 1 };
+    if (!context) return undefined;
     context.fillStyle = computed;
     context.fillRect(0, 0, 1, 1);
     const [r = 0, g = 0, b = 0, a = 255] = context.getImageData(0, 0, 1, 1).data;
@@ -286,18 +318,33 @@ export class StripePayment extends HTMLElement {
     const state = existing?.paymentIntent?.status;
     if (state === "succeeded" || state === "processing" || state === "requires_capture")
       return this.#confirmed();
-    this.#elements = this.#stripe.elements({ clientSecret, appearance: this.#appearance() });
-    this.#element?.destroy();
-    this.#element = this.#elements.create("payment", { layout: "tabs" });
     if (!this.#mountPoint) {
       this.#mountPoint = document.createElement("div");
       this.#mountPoint.slot = "stripe";
       this.append(this.#mountPoint);
     }
-    this.#element.on("ready", () => {
-      this.#button.disabled = false;
-    });
-    this.#element.mount(this.#mountPoint);
+    // Stripe.js throws on what it refuses (a malformed secret or key) and reports a form
+    // that couldn't load as `loaderror`: either way the storefront hears it, rather than
+    // waiting for a `hypha:ready` that won't come.
+    const unavailable = "The payment form couldn't be loaded. Please try again later.";
+    try {
+      this.#elements = this.#stripe.elements({ clientSecret, appearance: this.#appearance() });
+      this.#element?.destroy();
+      const element = this.#elements.create("payment", { layout: "tabs" });
+      this.#element = element;
+      element.on("ready", () => {
+        this.#button.disabled = false;
+        this.#emit("hypha:ready", {});
+      });
+      element.on("loaderror", () => {
+        this.#mountedFor = null;
+        this.#fail(unavailable);
+      });
+      element.mount(this.#mountPoint);
+    } catch {
+      this.#mountedFor = null;
+      this.#fail(unavailable);
+    }
   }
 
   #confirmed() {
@@ -308,12 +355,15 @@ export class StripePayment extends HTMLElement {
   async #pay() {
     const stripe = this.#stripe;
     const elements = this.#elements;
-    if (!stripe || !elements || this.#busy) return;
+    const clientSecret = this.#props.client_secret;
+    if (!stripe || !elements || !clientSecret || this.#busy) return;
     this.#busy = true;
     this.#button.disabled = true;
     this.#error.textContent = "";
-    // Whether the shopper may press again on this intent. A declined card fails the
-    // payment in Hypha (its `failed` is final), so the storefront starts a new one.
+    // Whether the shopper may press again on this intent. A declined card, a failed
+    // 3-D Secure check or a passing network error leaves it waiting for another try
+    // (Hypha's payment stays pending until the intent is over), so the shopper tries
+    // again right here; an intent that's over (canceled with its order) ends it.
     let retry = true;
     try {
       const submitted = await elements.submit();
@@ -321,13 +371,26 @@ export class StripePayment extends HTMLElement {
         return this.#fail(submitted.error.message ?? "Check your payment details.");
       const result = await stripe.confirmPayment({
         elements,
-        clientSecret: this.#props.client_secret,
+        clientSecret,
         confirmParams: { return_url: this.#props.return_url ?? location.href },
         redirect: "if_required",
       });
       if (result.error) {
-        retry = result.error.type !== "card_error";
-        return this.#fail(result.error.message ?? "The payment didn't go through.");
+        // Whether the intent still takes a try is the intent's state, not the error's
+        // type: Stripe is asked. Unknown (no answer) leaves the button on.
+        const message = result.error.message ?? "The payment didn't go through.";
+        const now = await stripe
+          .retrievePaymentIntent(clientSecret)
+          .then((r) => r.paymentIntent?.status)
+          .catch(() => undefined);
+        if (now === "succeeded" || now === "processing" || now === "requires_capture") {
+          retry = false;
+          return this.#confirmed();
+        }
+        retry = now === undefined || OPEN.has(now);
+        return this.#fail(
+          retry ? message : "This payment can't go on here: reload the page to start again.",
+        );
       }
       const status = result.paymentIntent?.status;
       if (status === "succeeded" || status === "processing" || status === "requires_capture") {
