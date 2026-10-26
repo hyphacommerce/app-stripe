@@ -14,11 +14,16 @@ What it does:
   email). The token answer names the store and issuer, which key the installation;
   every signed call names the store in `Hypha-Store` (session tokens in `store`), which
   picks the secret its signature is checked with.
-- **Answers `payments.start`** by creating a PaymentIntent through Stripe's REST API
-  (plain `fetch`, form-encoded; idempotency key = Hypha's payment ID; amounts converted
-  to Stripe's units, ISK/UGX ×100, three-decimal currencies in tens; `receipt_email`
-  only when Hypha sent the buyer's email), returning
+- **Answers `payments.start` v2** by creating a PaymentIntent for the cart through
+  Stripe's REST API (keyed by Hypha's payment ID, so a retried start makes one intent;
+  the amount in Stripe's units; the cart, payment and store in its metadata; a receipt
+  email only when Hypha sent the buyer's email), returning
   `client_widget { element: "stripe-payment", props: { client_secret, publishable_key, return_url, payment_id } }`.
+  The payment starts before its order exists: Hypha places the order once the app
+  reports the money committed, or **`payments.status`** says so (the intent's state read
+  from Stripe: `requires_capture` → `authorized`, `processing`, `succeeded` → `paid`,
+  `canceled`; anything else `open`), which checkout asks when the shopper's browser says
+  they paid before Stripe's webhook arrived.
 - **Answers `payments.capture`, `.void`, `.refund`** (Stripe's capture, cancel and
   refunds; Stripe's "no" becomes `refused` with its reason). Stripe's idempotency key is
   `<payment>:<point>:<Hypha's Idempotency-Key>`: Hypha's key is new per staff attempt
@@ -124,9 +129,11 @@ built-in `node:sqlite`).
    `payment_intent.payment_failed`, `payment_intent.canceled` and `charge.refunded`,
    then paste its signing secret (`whsec_…`) into the settings.
 4. **A payment method:** `POST /admin/payment-methods {"provider": "app_stripe", "name": "Card"}`
-   (or in the admin). The storefront mounts `<stripe-payment>` with the props
-   `payments.start` answered, and shows the confirmation on `hypha:payment-confirmed`;
-   the order turns paid when Stripe's webhook arrives and the app reports it.
+   (or in the admin). The storefront starts the cart's payment
+   (`POST /storefront/carts/{id}/payment`), mounts `<stripe-payment>` with the props
+   `payments.start` answered, and checks out on `hypha:payment-confirmed`; Hypha places
+   the order once the app says the money is committed (`payments.status`, or Stripe's
+   webhook reported by the app).
 
 Uninstalling in Hypha revokes the tokens and sends `app.uninstalled`, on which the app
 forgets them.
@@ -162,14 +169,17 @@ on a free port over a fresh Postgres database (created and dropped through
 over a temporary SQLite file, and a fake Stripe. It installs the app through
 authorize → the owner's approval (`POST /admin/oauth/requests/{id}/approve`) → token,
 saves the settings with a session token, places an order through the storefront API,
-checks that `payments.start` answered the element with the intent's client secret,
-delivers a signed `payment_intent.succeeded` and checks the order is paid, then a
-staff refund and `charge.refunded` (partially refunded), a second refund under Hypha's
-per-attempt key, a second `charge.refunded` and the first one again under a new event ID
-(each refund counted once), `GET /admin/payments/{id}`, a declined card (nothing reported, the
-payment stays pending), a cancelled order (Hypha's signed `order.cancelled` makes the
-app cancel the intent), the settings page's `?origin=`, the block, discovery and the
-element module.
+starts a cart's payment through the storefront API and checks that `payments.start`
+answered the element with the intent's client secret, that checkout waits until the
+intent succeeds and then places the order by asking `payments.status`, that a signed
+`payment_intent.succeeded` is reported (the paid payment stays paid), then a staff refund
+and `charge.refunded` (partially refunded), a second refund under Hypha's per-attempt key,
+a second `charge.refunded` and the first one again under a new event ID (each refund
+counted once), `GET /admin/payments/{id}`, a declined card (nothing reported, the payment
+stays pending and checkout waits), an authorized intent under manual capture placing its
+order, a staff void through `payments.void` (the intent cancelled at Stripe, the payment
+voided by Stripe's `payment_intent.canceled`) and the order cancelled, the settings
+page's `?origin=`, the block, discovery and the element module.
 
 With `STRIPE_TEST_SECRET_KEY` and `STRIPE_TEST_PUBLISHABLE_KEY` set, it uses Stripe's
 test mode instead of the fake (the intent is confirmed with `pm_card_visa`); Stripe's
@@ -187,7 +197,7 @@ src/
   installations.ts     a call's installation by store, secrets, the Hypha client (its
                        TokenStore's withLock: refreshes under a lock in storage)
   hypha-api.ts         reading payments and orders through the typed admin client
-  payments.ts          payments.start / capture / void / refund
+  payments.ts          payments.start (v2) / status / capture / void / refund
   stripe-webhooks.ts   Stripe's webhooks → Hypha's payment events
   hypha-webhooks.ts    Hypha's webhooks through webhookHandler (order.cancelled, app.uninstalled)
   block.ts             the order.payment block

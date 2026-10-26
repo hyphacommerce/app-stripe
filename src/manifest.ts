@@ -15,6 +15,7 @@ export const PATHS = {
   icon: "/icon.svg",
   hyphaWebhooks: "/hypha/webhooks",
   start: "/hypha/payments/start",
+  status: "/hypha/payments/status",
   capture: "/hypha/payments/capture",
   void: "/hypha/payments/void",
   refund: "/hypha/payments/refund",
@@ -46,7 +47,8 @@ export function manifest(appUrl: string): AppManifest {
     privacy_url: PATHS.privacy,
     webhooks: { url: PATHS.hyphaWebhooks, events: ["order.cancelled"] },
     extension_points: [
-      { point: "payments.start", version: 1, url: PATHS.start },
+      { point: "payments.start", version: 2, url: PATHS.start },
+      { point: "payments.status", version: 1, url: PATHS.status },
       { point: "payments.capture", version: 1, url: PATHS.capture },
       { point: "payments.void", version: 1, url: PATHS.void },
       { point: "payments.refund", version: 1, url: PATHS.refund },

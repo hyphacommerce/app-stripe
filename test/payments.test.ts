@@ -5,8 +5,7 @@ import { configure, harness, PUBLISHABLE_KEY, STORE } from "./helpers.ts";
 
 const START = {
   payment: "pay_0001",
-  order: "ord_0001",
-  order_number: 1001,
+  cart: "cart_0001",
   method: "pm_0001",
   amount: { amount: 1390, currency: "EUR" },
   channel: "chan_1",
@@ -46,7 +45,48 @@ test("payments.start makes a PaymentIntent and answers the element with its secr
   assert.equal(sent?.form["automatic_payment_methods[enabled]"], "true");
   assert.equal(sent?.form.receipt_email, "ana@example.hr");
   assert.equal(sent?.form["metadata[hypha_payment]"], "pay_0001");
+  assert.equal(sent?.form["metadata[hypha_cart]"], "cart_0001");
   assert.equal(sent?.form["metadata[hypha_store]"], STORE);
+  assert.equal(sent?.form.description, "Cart cart_0001");
+});
+
+test("payments.status answers the intent's state from Stripe", async () => {
+  const h = await harness();
+  await h.install();
+  await configure(h);
+  const { reference } = (await (await h.extension("payments.start", START)).json()) as {
+    reference: string;
+  };
+  const open = await h.extension("payments.status", { payment: "pay_0001", cart: "cart_0001" });
+  assert.equal(open.status, 200);
+  assert.deepEqual(await open.json(), { state: "open", reference, attempt: reference });
+  h.stripe.succeed(reference);
+  const paid = await h.extension("payments.status", { payment: "pay_0001", reference });
+  assert.deepEqual(await paid.json(), { state: "paid", reference, attempt: reference });
+});
+
+test("payments.status for a payment the app never started is open", async () => {
+  const h = await harness();
+  await h.install();
+  await configure(h);
+  const response = await h.extension("payments.status", { payment: "pay_none" });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { state: "open" });
+});
+
+test("payments.status with manual capture: a confirmed intent is authorized", async () => {
+  const h = await harness();
+  await h.install();
+  await configure(h, { captureMode: "manual" });
+  const { reference } = (await (await h.extension("payments.start", START)).json()) as {
+    reference: string;
+  };
+  h.stripe.succeed(reference);
+  const response = await h.extension("payments.status", {
+    payment: "pay_0001",
+    attempt: reference,
+  });
+  assert.deepEqual(await response.json(), { state: "authorized", reference, attempt: reference });
 });
 
 test("a call for a store the app isn't installed in is a 401", async () => {

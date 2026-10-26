@@ -9,8 +9,7 @@ async function started(h: Harness) {
   await configure(h);
   const response = await h.extension("payments.start", {
     payment: "pay_0001",
-    order: "ord_0001",
-    order_number: 1001,
+    cart: "cart_0001",
     method: "pm_1",
     amount: { amount: 1390, currency: "EUR" },
     channel: "chan_1",

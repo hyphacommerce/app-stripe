@@ -53,7 +53,8 @@ export const SCHEMA: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS payments (
     installation_id TEXT NOT NULL,
     payment_id TEXT NOT NULL,
-    order_id TEXT NOT NULL,
+    cart_id TEXT,
+    order_id TEXT,
     intent_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (installation_id, payment_id)
@@ -69,6 +70,37 @@ export function sqlStorage(db: SqlDriver): Storage {
   return {
     async migrate() {
       for (const statement of SCHEMA) await db.run(statement, []);
+      // A table made before payments started with a cart (`payments.start` v1) has no
+      // `cart_id` and requires an order; SQLite can't drop a NOT NULL, so it's rebuilt.
+      const columns = await db.all("PRAGMA table_info(payments)", []);
+      const names = new Set(columns.map((c) => String(c.name)));
+      const orderRequired = columns.some((c) => c.name === "order_id" && Number(c.notnull) === 1);
+      if (!names.has("cart_id") || orderRequired) {
+        await db.run(
+          `CREATE TABLE payments_v2 (
+            installation_id TEXT NOT NULL,
+            payment_id TEXT NOT NULL,
+            cart_id TEXT,
+            order_id TEXT,
+            intent_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (installation_id, payment_id)
+          )`,
+          [],
+        );
+        await db.run(
+          `INSERT INTO payments_v2 (installation_id, payment_id, cart_id, order_id, intent_id,
+            created_at) SELECT installation_id, payment_id, NULL, order_id, intent_id, created_at
+            FROM payments`,
+          [],
+        );
+        await db.run("DROP TABLE payments", []);
+        await db.run("ALTER TABLE payments_v2 RENAME TO payments", []);
+        await db.run(
+          "CREATE INDEX IF NOT EXISTS payments_by_intent ON payments (installation_id, intent_id)",
+          [],
+        );
+      }
     },
     async getInstallation(id) {
       return installation(await db.first("SELECT * FROM installations WHERE id = ?", [id]));
@@ -185,9 +217,9 @@ export function sqlStorage(db: SqlDriver): Storage {
     },
     async putPayment(row) {
       await db.run(
-        `INSERT OR REPLACE INTO payments (installation_id, payment_id, order_id, intent_id,
-          created_at) VALUES (?, ?, ?, ?, ?)`,
-        [row.installationId, row.paymentId, row.orderId, row.intentId, row.createdAt],
+        `INSERT OR REPLACE INTO payments (installation_id, payment_id, cart_id, order_id, intent_id,
+          created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [row.installationId, row.paymentId, row.cartId, row.orderId, row.intentId, row.createdAt],
       );
     },
     async paymentById(installationId, paymentId) {
@@ -242,7 +274,8 @@ function toPayment(row: Record<string, unknown>): PaymentRow {
   return {
     installationId: text(row.installation_id),
     paymentId: text(row.payment_id),
-    orderId: text(row.order_id),
+    cartId: nullableString(row.cart_id),
+    orderId: nullableString(row.order_id),
     intentId: text(row.intent_id),
     createdAt: Number(row.created_at),
   };

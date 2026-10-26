@@ -59,7 +59,10 @@ export interface OAuthStateRow {
 export interface PaymentRow {
   installationId: string;
   paymentId: string;
-  orderId: string;
+  /** The cart it was started for (a payment starts before its order exists). */
+  cartId: string | null;
+  /** Its order, when Hypha named one at the start (it doesn't, today). */
+  orderId: string | null;
   intentId: string;
   createdAt: number;
 }

@@ -176,7 +176,7 @@ export async function harness(): Promise<Harness> {
             timestamp: Math.floor(Date.now() / 1000),
           }),
           "hypha-extension": point,
-          "hypha-extension-version": "1",
+          "hypha-extension-version": point === "payments.start" ? "2" : "1",
           // Hypha's keys: the payment ID for a start, a new one per attempt otherwise.
           "idempotency-key":
             options.idempotencyKey ??
