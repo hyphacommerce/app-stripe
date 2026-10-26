@@ -77,6 +77,19 @@ test("authorized, failed and canceled map to Hypha's moves", async () => {
   );
 });
 
+test("payment_intent.canceled after a final decline reports failed, as payments.status would", async () => {
+  const h = await harness();
+  const reference = await started(h);
+  const intent = h.stripe.intents.get(reference);
+  if (intent)
+    Object.assign(intent, { status: "canceled", last_payment_error: { code: "card_declined" } });
+  await deliver(h, intentEvent(h, "evt_c2", "payment_intent.canceled", reference));
+  assert.deepEqual(
+    h.hypha.events.map((e) => e.body.type),
+    ["failed"],
+  );
+});
+
 test("a declined intent the shopper may retry reports nothing", async () => {
   const h = await harness();
   const reference = await started(h);

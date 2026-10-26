@@ -18,7 +18,7 @@ import type { Deps } from "./config.ts";
 import { type Installation, type Installations, NotConfiguredError } from "./installations.ts";
 import { ELEMENT_TAG } from "./manifest.ts";
 import { AmountError, toStripeAmount } from "./stripe/amounts.ts";
-import { type PaymentIntent, StripeError } from "./stripe/api.ts";
+import { canceledOutcome, type PaymentIntent, StripeError } from "./stripe/api.ts";
 import { reportToHypha } from "./stripe-webhooks.ts";
 
 /** Which installation each call is for: set when its secret is looked up by `Hypha-Store`. */
@@ -69,16 +69,29 @@ export function paymentHandlers(deps: Deps, installations: Installations) {
   );
 
   // Checkout asks where the money is when the shopper's browser says they paid before
-  // Stripe's webhook arrived: the intent's state, read from Stripe.
+  // Stripe's webhook arrived: the intent's state, read from Stripe. Hypha sends the
+  // reference the start answered; storage is read only when it sends none.
   const status = defineExtensionHandler("payments.status", async (body, context) => {
     const installation = installationOf(context);
     const { stripe } = await configured(installation);
-    const known = await deps.storage.paymentById(installation.row.id, body.payment);
-    const reference = body.attempt ?? body.reference ?? known?.intentId;
+    const reference =
+      body.attempt ??
+      body.reference ??
+      (await deps.storage.paymentById(installation.row.id, body.payment))?.intentId;
     if (!reference?.startsWith("pi_")) return { state: "open" } satisfies PaymentsStatusResponse;
-    const intent = await stripe.retrievePaymentIntent(reference);
+    let intent: PaymentIntent;
+    try {
+      intent = await stripe.retrievePaymentIntent(reference);
+    } catch (error) {
+      // An intent the account doesn't know (the keys were swapped while a cart held a
+      // pending payment): say so, so Hypha voids it and the shopper starts anew, rather
+      // than fail, which would leave the cart's checkout waiting for good.
+      if (error instanceof StripeError && error.code === "resource_missing")
+        return { state: "canceled", reference } satisfies PaymentsStatusResponse;
+      throw error;
+    }
     return {
-      state: intentState(intent.status),
+      state: intentState(intent),
       reference: intent.id,
       attempt: intent.id,
     } satisfies PaymentsStatusResponse;
@@ -252,7 +265,6 @@ async function intentFor(
       installationId: installation.row.id,
       paymentId: body.payment,
       cartId: body.cart,
-      orderId: body.order ?? null,
       intentId: intent.id,
       createdAt: deps.now(),
     });
@@ -265,12 +277,12 @@ async function intentFor(
 }
 
 /**
- * A PaymentIntent's status as a payment's state: `requires_capture` holds the money,
- * `processing` is collecting it, `succeeded` has it; the `requires_…` steps before wait
- * for the shopper.
+ * A PaymentIntent as a payment's state: `requires_capture` holds the money, `processing`
+ * is collecting it, `succeeded` has it; the `requires_…` steps before wait for the
+ * shopper; a canceled one failed or was cancelled by the webhook's rule.
  */
-function intentState(status: string): PaymentsStatusResponse["state"] {
-  switch (status) {
+function intentState(intent: PaymentIntent): PaymentsStatusResponse["state"] {
+  switch (intent.status) {
     case "requires_capture":
       return "authorized";
     case "processing":
@@ -278,7 +290,7 @@ function intentState(status: string): PaymentsStatusResponse["state"] {
     case "succeeded":
       return "paid";
     case "canceled":
-      return "canceled";
+      return canceledOutcome(intent);
     default:
       return "open";
   }

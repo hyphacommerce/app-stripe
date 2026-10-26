@@ -706,8 +706,8 @@ try {
   );
   await sf("PUT", `${C2}/email`, { email: "ana@example.hr" });
   await sf("PUT", `${C2}/payment-method`, { payment_method: at(method.body, "id") });
-  // Manual capture from here: the order is placed on an authorization, which a cancelled
-  // order's webhook makes the app release at Stripe.
+  // Manual capture from here: the order is placed on an authorization, which staff
+  // release through payments.void before cancelling the order.
   const manual = await http("PUT", `${APP}/api/settings`, {
     headers: { authorization: `Bearer ${sessionToken}` },
     body: { capture_mode: "manual" },

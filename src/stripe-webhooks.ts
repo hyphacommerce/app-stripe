@@ -11,7 +11,7 @@ import type { Deps } from "./config.ts";
 import type { Installation, Installations } from "./installations.ts";
 import { fromStripeAmount } from "./stripe/amounts.ts";
 import { bool, isRecord, num, parseJson, rec, str, strings } from "./json.ts";
-import type { Refund, StripeClient, StripeEvent } from "./stripe/api.ts";
+import { canceledOutcome, type Refund, type StripeClient, type StripeEvent } from "./stripe/api.ts";
 import { STRIPE_SIGNATURE_HEADER, verifyStripeSignature } from "./stripe/signature.ts";
 
 export type PaymentEventType =
@@ -109,7 +109,7 @@ export async function mapStripeEvent(
           return { ignore: "the shopper may still pay this intent" };
         return [{ ...base, type: "failed" }];
       case "payment_intent.canceled":
-        return [{ ...base, type: "voided" }];
+        return [{ ...base, type: canceledOutcome(object) === "failed" ? "failed" : "voided" }];
       default:
         return { ignore: `${event.type} isn't reported` };
     }
