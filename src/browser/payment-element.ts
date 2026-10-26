@@ -41,6 +41,12 @@ declare global {
 
 let loading: Promise<StripeFactory> | undefined;
 
+/** An sRGB byte as its linear value, for relative luminance. */
+function linear(c: number): number {
+  const v = c / 255;
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+
 /** Loads Stripe.js once per page, from js.stripe.com. */
 export function loadStripe(doc: Document = document): Promise<StripeFactory> {
   const win = doc.defaultView as Window | null;
@@ -187,24 +193,75 @@ export class StripePayment extends HTMLElement {
     this.#emit("hypha:error", { message: text });
   }
 
-  /** `--hypha-*` from the page, as Stripe's Appearance API variables. */
+  /**
+   * `--hypha-*` from the page, as Stripe's Appearance API: its fields live in Stripe's
+   * iframes, which see none of the page's CSS. Colours are resolved here (a storefront's
+   * may be `light-dark()` pairs or `oklch()`, which Stripe doesn't read: it takes only
+   * hex, `rgb()` and `hsl()`), and a dark background (or `--hypha-color-scheme: dark`)
+   * picks Stripe's dark theme.
+   */
   #appearance(): Record<string, unknown> {
     const css = getComputedStyle(this);
     const read = (name: string) => css.getPropertyValue(name).trim() || undefined;
     const variables: Record<string, string> = {};
-    const map: [string, string][] = [
+    const colours: [string, string][] = [
       ["--hypha-color-accent", "colorPrimary"],
       ["--hypha-color-text", "colorText"],
+      ["--hypha-color-text-secondary", "colorTextSecondary"],
       ["--hypha-color-background", "colorBackground"],
       ["--hypha-color-error", "colorDanger"],
-      ["--hypha-font-family", "fontFamily"],
-      ["--hypha-radius", "borderRadius"],
     ];
-    for (const [property, variable] of map) {
-      const value = read(property);
-      if (value) variables[variable] = value;
+    for (const [property, variable] of colours) {
+      const value = read(property) && this.#rgb(`var(${property})`);
+      if (value) variables[variable] = value.css;
     }
-    return { theme: "stripe", variables };
+    const font = read("--hypha-font-family");
+    if (font) variables.fontFamily = font;
+    const radius = read("--hypha-radius");
+    if (radius) variables.borderRadius = radius;
+
+    const scheme = read("--hypha-color-scheme");
+    const background = read("--hypha-color-background")
+      ? this.#rgb("var(--hypha-color-background)")
+      : undefined;
+    const dark = scheme ? scheme === "dark" : background ? background.luminance < 0.4 : false;
+
+    const rules: Record<string, Record<string, string>> = {};
+    const border = read("--hypha-color-border") && this.#rgb("var(--hypha-color-border)");
+    if (border) {
+      const line = { border: `1px solid ${border.css}`, boxShadow: "none" };
+      rules[".Input"] = line;
+      rules[".Tab"] = line;
+      rules[".PickerItem"] = line;
+    }
+    return { theme: dark ? "night" : "stripe", variables, rules };
+  }
+
+  /**
+   * A CSS colour as `rgb()` with its relative luminance, or nothing when it isn't one.
+   * Resolved on a probe in this element's shadow root (so `light-dark()` follows the
+   * page's colour scheme and `var()` its custom properties), then through a canvas,
+   * which turns any colour space into sRGB bytes. Without a canvas (a test DOM) the
+   * computed value is passed on as is.
+   */
+  #rgb(colour: string): { css: string; luminance: number } | undefined {
+    const probe = document.createElement("span");
+    probe.style.color = colour;
+    this.#root.append(probe);
+    const computed = getComputedStyle(probe).color;
+    probe.remove();
+    if (!computed) return undefined;
+    const context = document.createElement("canvas").getContext?.("2d", {
+      willReadFrequently: true,
+    });
+    if (!context) return { css: computed, luminance: 1 };
+    context.fillStyle = computed;
+    context.fillRect(0, 0, 1, 1);
+    const [r = 0, g = 0, b = 0, a = 255] = context.getImageData(0, 0, 1, 1).data;
+    const luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    const css =
+      a === 255 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
+    return { css, luminance };
   }
 
   async #mount() {

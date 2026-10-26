@@ -82,7 +82,8 @@ test("props set before the upgrade are kept and the Payment Element is mounted",
     appearance: { variables: Record<string, string> };
   };
   assert.equal(options.clientSecret, "pi_1_secret_x");
-  assert.equal(options.appearance.variables.colorPrimary, "#ff0000");
+  // Resolved on a probe: the test DOM computes the literal, a browser `rgb()`.
+  assert.match(options.appearance.variables.colorPrimary ?? "", /^(#ff0000|rgb\(255, 0, 0\))$/);
   // Stripe's container is in the light DOM, slotted into the shadow root.
   assert.equal(element.querySelector('[slot="stripe"]') !== null, true);
   assert.ok(element.shadowRoot?.querySelector("button"));
