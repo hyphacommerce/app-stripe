@@ -106,30 +106,13 @@ async function hyphaHook(
   });
 }
 
-test("order.cancelled cancels the order's open intent at Stripe, once per delivery", async () => {
-  const h = await harness();
-  const reference = await startPayment(h);
-  const envelope = {
-    id: "evt_h1",
-    type: "order.cancelled",
-    subject: { type: "order", id: "ord_0001", version: 3 },
-  };
-  assert.equal((await hyphaHook(h, envelope)).status, 204);
-  assert.equal(h.stripe.intents.get(reference)?.status, "canceled");
-  const cancels = () => h.stripe.requests.filter((r) => r.path.endsWith("/cancel")).length;
-  assert.equal(cancels(), 1);
-  // A retry of the same delivery is answered without handling it again.
-  assert.equal((await hyphaHook(h, envelope)).status, 204);
-  assert.equal(cancels(), 1);
-});
-
 test("a Hypha webhook signed with another secret, or for another store, is a 401", async () => {
   const h = await harness();
   await startPayment(h);
   const envelope = {
     id: "evt_h2",
-    type: "order.cancelled",
-    subject: { type: "order", id: "ord_0001", version: 1 },
+    type: "app.uninstalled",
+    subject: { type: "app", id: "appid_0123", version: 1 },
   };
   const forged = await hyphaHook(h, envelope, { secret: "hypha_as_x" });
   assert.equal(forged.status, 401);
@@ -143,26 +126,22 @@ test("a Hypha webhook signed with another secret, or for another store, is a 401
 test("a webhook that isn't an envelope is a 400", async () => {
   const h = await harness();
   await startPayment(h);
-  const response = await hyphaHook(h, { id: "evt_h4", type: "order.cancelled", subject: "x" });
+  const response = await hyphaHook(h, { id: "evt_h4", type: "app.uninstalled", subject: "x" });
   assert.equal(response.status, 400);
 });
 
-test("a failure answers 500 so Hypha retries, and the retry is handled", async () => {
+test("a delivery handled once is answered again without handling it", async () => {
   const h = await harness();
-  const reference = await startPayment(h);
-  const order = h.hypha.orders.get("ord_0001");
-  h.hypha.orders.delete("ord_0001");
-  h.hypha.failOrders = true;
+  await startPayment(h);
   const envelope = {
     id: "evt_h5",
-    type: "order.cancelled",
-    subject: { type: "order", id: "ord_0001", version: 2 },
+    type: "app.installed",
+    subject: { type: "app", id: "appid_0123", version: 2 },
   };
-  assert.equal((await hyphaHook(h, envelope)).status, 500);
-  h.hypha.failOrders = false;
-  if (order) h.hypha.orders.set("ord_0001", order);
   assert.equal((await hyphaHook(h, envelope)).status, 204);
-  assert.equal(h.stripe.intents.get(reference)?.status, "canceled");
+  assert.equal((await hyphaHook(h, envelope)).status, 204);
+  const row = await h.deps.storage.installationByStore(STORE);
+  assert.equal(await h.deps.storage.eventSeen(row?.id ?? "", "hypha", "dlv_evt_h5"), true);
 });
 
 test("app.installed is acknowledged", async () => {

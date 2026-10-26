@@ -44,8 +44,7 @@ What it does:
   declined card leaves the intent waiting for another one, and the payment stays
   `pending` (the storefront's "Complete payment" starts it again under the same ID,
   which answers the same intent).
-- **Hears Hypha's webhooks** (`order.cancelled`: it cancels the order's open intents;
-  `app.uninstalled`: it forgets the tokens) through `@hyphacommerce/app`'s `webhookHandler`,
+- **Hears Hypha's webhooks** (`app.uninstalled`: it forgets the tokens) through `@hyphacommerce/app`'s `webhookHandler`,
   the secret picked by `Hypha-Store`, each delivery handled once (`Hypha-Delivery-Id`);
   a failure answers 500 so Hypha retries.
 - **Admin UI**: a settings page (`settings.app`, in the admin's iframe, using
@@ -199,7 +198,7 @@ src/
   hypha-api.ts         reading payments and orders through the typed admin client
   payments.ts          payments.start (v2) / status / capture / void / refund
   stripe-webhooks.ts   Stripe's webhooks → Hypha's payment events
-  hypha-webhooks.ts    Hypha's webhooks through webhookHandler (order.cancelled, app.uninstalled)
+  hypha-webhooks.ts    Hypha's webhooks through webhookHandler (app.uninstalled)
   block.ts             the order.payment block
   settings.ts          the settings API and page
   crypto.ts            AES-GCM sealing

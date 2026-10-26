@@ -45,7 +45,7 @@ export function manifest(appUrl: string): AppManifest {
       "customer_data:email": "Stripe emails the buyer their receipt.",
     },
     privacy_url: PATHS.privacy,
-    webhooks: { url: PATHS.hyphaWebhooks, events: ["order.cancelled"] },
+    webhooks: { url: PATHS.hyphaWebhooks, events: ["app.uninstalled"] },
     extension_points: [
       { point: "payments.start", version: 2, url: PATHS.start },
       { point: "payments.status", version: 1, url: PATHS.status },
